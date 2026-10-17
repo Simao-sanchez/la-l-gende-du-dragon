@@ -50,16 +50,17 @@ addEventListener("resize", resize); resize();
 const keys = {};
 addEventListener("keydown", e => { const k = e.key.toLowerCase(); keys[k] = true; if (k.startsWith("arrow")) e.preventDefault(); });
 addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
-let stick = null;
-cv.addEventListener("pointerdown", e => { const r = cv.getBoundingClientRect(); stick = { ox: e.clientX - r.left, oy: e.clientY - r.top, x: 0, y: 0, l: r.left, t: r.top }; cv.setPointerCapture(e.pointerId); });
+let stick = null, dashReq = false;
+cv.addEventListener("pointerdown", e => { const r = cv.getBoundingClientRect();
+  if (g && g.dashOn && Math.hypot(e.clientX - r.left - (W - 50), e.clientY - r.top - (H - 50)) < 42) { dashReq = true; return; } /* bouton de dash */ stick = { id: e.pointerId, ox: e.clientX - r.left, oy: e.clientY - r.top, x: 0, y: 0, l: r.left, t: r.top }; cv.setPointerCapture(e.pointerId); });
 cv.addEventListener("pointermove", e => {
-  if (!stick) return;
+  if (!stick || e.pointerId !== stick.id) return;
   let dx = e.clientX - stick.l - stick.ox, dy = e.clientY - stick.t - stick.oy;
   const d = Math.hypot(dx, dy), m = 50;
   if (d > m) { dx = dx / d * m; dy = dy / d * m; }
   stick.x = dx / m; stick.y = dy / m;
 });
-["pointerup", "pointercancel"].forEach(n => cv.addEventListener(n, () => { stick = null; }));
+["pointerup", "pointercancel"].forEach(n => cv.addEventListener(n, e => { if (stick && e.pointerId === stick.id) stick = null; }));
 
 // ====== Équipements : raretés, emplacements, tirage ======
 const RAR = [
@@ -90,18 +91,31 @@ function saveLoot() { // enregistre dans la base les objets trouvés pendant la 
 }
 
 // ====== Améliorations proposées à chaque niveau ======
+// only = modes d’attaque concernés, cls = classes concernées, max = nombre de fois maximum, need = amélioration requise
+// d2 = texte affiché quand on la reprend une nouvelle fois
 const UPGRADES = [
-  { n: "Lame affûtée", d: "+25 % de dégâts", f: g => g.w.dmg *= 1.25 },
-  { n: "Mains rapides", d: "Attaque 20 % plus vite", f: g => g.w.rate *= 0.8 },
-  { n: "Tir multiple", d: "+1 projectile", only: ["proj"], f: g => g.w.count++ },
-  { n: "Double sort", d: "+1 zone magique à chaque lancer", only: ["zone"], f: g => g.w.count++ },
-  { n: "Grande allonge", d: "+25 % de portée du coup d’épée", only: ["slash"], f: g => g.w.radius *= 1.25 },
-  { n: "Orbe gardienne", d: "+1 orbe qui tourne autour de toi", f: g => g.w.orbs++ },
-  { n: "Traversée", d: "Les tirs percent +1 ennemi", only: ["proj"], f: g => g.w.pierce++ },
-  { n: "Bottes légères", d: "+15 % de vitesse", f: g => g.p.speed *= 1.15 },
-  { n: "Aimant", d: "Ramasse les gemmes de plus loin", f: g => g.p.mag += 50 },
-  { n: "Festin", d: "+20 PV max et soin de 40 PV", f: g => { g.p.max += 20; g.p.hp = Math.min(g.p.max, g.p.hp + 40); } }
+  { id: "dmg", n: "Lame affûtée", d: "+25 % de dégâts", f: g => g.w.dmg *= 1.25 },
+  { id: "rate", n: "Mains rapides", d: "Attaque 20 % plus vite", f: g => g.w.rate *= 0.8 },
+  { id: "count", n: "Tir multiple", d: "+1 projectile", only: ["proj"], f: g => g.w.count++ },
+  { id: "zones", n: "Double sort", d: "+1 zone magique à chaque lancer", only: ["zone"], f: g => g.w.count++ },
+  { id: "reach", n: "Grande allonge", d: "+25 % de portée du coup d’épée", only: ["slash"], f: g => g.w.radius *= 1.25 },
+  { id: "orb", n: "Orbe gardienne", d: "+1 orbe qui tourne autour de toi", f: g => g.w.orbs++ },
+  { id: "pierce", n: "Traversée", d: "Les tirs percent +1 ennemi", only: ["proj"], f: g => g.w.pierce++ },
+  { id: "speed", n: "Bottes légères", d: "+15 % de vitesse", f: g => g.p.speed *= 1.15 },
+  { id: "mag", n: "Aimant", d: "Ramasse les gemmes de plus loin", f: g => g.p.mag += 50 },
+  { id: "heal", n: "Festin", d: "+20 PV max et soin de 40 PV", f: g => { g.p.max += 20; g.p.hp = Math.min(g.p.max, g.p.hp + 40); } },
+  // pouvoirs spéciaux
+  { id: "dash", n: "Dash", d: "Espace, Maj ou le bouton DASH : ruée rapide, invincible pendant le dash (recharge 4 s)", max: 1, f: g => { g.dashOn = true; } },
+  { id: "dash2", n: "Dash affûté", d: "Le dash se recharge 20 % plus vite", need: "dash", max: 3, f: g => { g.dashCd *= 0.8; } },
+  { id: "regen", n: "Régénération", d: "Récupère 1 PV par seconde", d2: "+1 PV par seconde en plus", max: 3, f: g => { g.regen += 1; } },
+  { id: "ls", n: "Vol de vie", d: "Soigne 4 % des dégâts infligés", d2: "+4 % de vol de vie en plus", cls: ["guerrier"], max: 5, f: g => { g.ls += 0.04; } },
+  { id: "boom", n: "Flèches explosives", d: "Les flèches explosent en zone à l’impact", d2: "Des explosions plus larges", cls: ["archer"], max: 3, f: g => { g.boom++; } },
+  { id: "flame", n: "Terre brûlée", d: "Les zones laissent des flammes qui brûlent les ennemis", d2: "Des flammes plus durables et plus brûlantes", cls: ["mage"], max: 3, f: g => { g.flame++; } }
 ];
+function upgradePool() { // améliorations proposées maintenant, selon la classe, le mode d’attaque et ce qui est déjà pris
+  return UPGRADES.filter(u => (!u.only || u.only.includes(g.w.mode)) && (!u.cls || u.cls.includes(g.cls)) &&
+    (!u.max || (g.up[u.id] || 0) < u.max) && (!u.need || g.up[u.need]));
+}
 
 // ====== État du jeu ======
 // ====== Connexion à Supabase (base de données en ligne) ======
@@ -171,7 +185,7 @@ function newGame() {
   g = { state: "menu", t: 0, kills: 0, spawn: 0, cd: 0, ang: 0, pending: 0,
     p: { x: 0, y: 0, r: 12, hp: 100, max: 100, speed: 150, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
     w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0, mode: "proj", radius: 70 },
-    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], zones: [], fx: [], run: 0, runF: 0, nextBoss: 90, nextShard: 4, msg: "", msgT: 0 };
+    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], up: {}, ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, nextBoss: 90, nextShard: 4, msg: "", msgT: 0 };
 }
 
 function spawnEnemy() {
@@ -182,6 +196,15 @@ function spawnEnemy() {
 }
 
 // ====== Mise à jour (appelée à chaque image) ======
+function dealDamage(e, d) { // tous les dégâts du joueur passent ici (vol de vie du guerrier)
+  const real = Math.min(d, Math.max(0, e.hp)); e.hp -= d;
+  if (g.ls) g.p.hp = Math.min(g.p.max, g.p.hp + real * g.ls);
+}
+function explode(x, y, src) { // flèches explosives de l’archer
+  const r = 40 + 15 * g.boom;
+  for (const o of g.enemies) if (o !== src && Math.hypot(o.x - x, o.y - y) < r + o.r) dealDamage(o, g.w.dmg * 0.6);
+  g.fx.push({ x, y, r, t: 0.25, c: "#ffb36b" });
+}
 function update(dt) {
   const p = g.p, w = g.w;
   g.t += dt; p.inv -= dt; g.ang += dt * 3;
@@ -192,7 +215,19 @@ function update(dt) {
   if (stick) { mx += stick.x; my += stick.y; }
   const l = Math.hypot(mx, my);
   if (l > 1) { mx /= l; my /= l; }
-  p.x += mx * p.speed * dt; p.y += my * p.speed * dt;
+  g.dashCdT -= dt;
+  const wantDash = keys[" "] || keys.shift || dashReq; dashReq = false;
+  if (g.dashOn && wantDash && g.dashCdT <= 0 && g.dashT <= 0) { // dash : direction choisie au départ
+    const dl = Math.hypot(mx, my);
+    g.dashV = dl > 0.1 ? { x: mx / dl, y: my / dl } : { x: p.face || 1, y: 0 };
+    g.dashT = 0.18; g.dashCdT = g.dashCd;
+  }
+  if (g.dashT > 0) { // ruée rapide, invincible pendant toute sa durée
+    g.dashT -= dt; p.inv = Math.max(p.inv, 0.02);
+    p.x += g.dashV.x * p.speed * 4.2 * dt; p.y += g.dashV.y * p.speed * 4.2 * dt;
+    g.fx.push({ x: p.x, y: p.y, r: 10, t: 0.2, c: "#d9c6ff" });
+  } else { p.x += mx * p.speed * dt; p.y += my * p.speed * dt; }
+  if (g.regen) p.hp = Math.min(p.max, p.hp + g.regen * dt);
   p.mov = !!(mx || my); if (mx) p.face = mx > 0 ? 1 : -1;
 
   // Apparition des ennemis : de plus en plus nombreux avec le temps
@@ -231,7 +266,7 @@ function update(dt) {
     const near = g.enemies.filter(e => d2(e) < 420 * 420).sort((a, b) => d2(a) - d2(b));
     if (w.mode === "slash") {
       if (near.length && Math.sqrt(d2(near[0])) < w.radius + near[0].r + 10) {
-        for (const e of g.enemies) if (Math.sqrt(d2(e)) < w.radius + e.r) e.hp -= w.dmg;
+        for (const e of g.enemies) if (Math.sqrt(d2(e)) < w.radius + e.r) dealDamage(e, w.dmg);
         g.fx.push({ follow: true, r: w.radius, t: 0.18, c: "#ffe9b0" });
         g.cd = w.rate;
       }
@@ -253,11 +288,17 @@ function update(dt) {
     z.t -= dt;
     if (z.t <= 0) {
       z.done = true;
-      for (const e of g.enemies) if (Math.hypot(e.x - z.x, e.y - z.y) < z.r + e.r) e.hp -= z.d;
+      for (const e of g.enemies) if (Math.hypot(e.x - z.x, e.y - z.y) < z.r + e.r) dealDamage(e, z.d);
       g.fx.push({ x: z.x, y: z.y, r: z.r, t: 0.25, c: "#b88af0" });
+      if (g.flame) g.flames.push({ x: z.x, y: z.y, r: z.r * 0.85, t: 2 + g.flame, k: 0 }); // flammes laissées sur place
     }
   }
   g.zones = g.zones.filter(z => !z.done);
+  for (const f of g.flames) { // les flammes brûlent les ennemis qui restent dedans
+    f.t -= dt; f.k -= dt;
+    if (f.k <= 0) { f.k = 0.5; for (const e of g.enemies) if (Math.hypot(e.x - f.x, e.y - f.y) < f.r + e.r) dealDamage(e, g.w.dmg * 0.3 * g.flame); }
+  }
+  g.flames = g.flames.filter(f => f.t > 0);
   for (const f of g.fx) f.t -= dt;
   g.fx = g.fx.filter(f => f.t > 0);
 
@@ -267,7 +308,7 @@ function update(dt) {
     for (const e of g.enemies) {
       if (s.pl < 0) break;
       if (s.hit.includes(e)) continue;
-      if (Math.hypot(e.x - s.x, e.y - s.y) < e.r + 4) { e.hp -= w.dmg; s.hit.push(e); s.pl--; }
+      if (Math.hypot(e.x - s.x, e.y - s.y) < e.r + 4) { dealDamage(e, w.dmg); s.hit.push(e); s.pl--; if (g.boom) explode(e.x, e.y, e); }
     }
   }
   g.shots = g.shots.filter(s => s.life > 0 && s.pl >= 0);
@@ -275,7 +316,7 @@ function update(dt) {
   // Orbes qui tournent autour du joueur
   for (let i = 0; i < w.orbs; i++) {
     const a = g.ang + i * 6.283 / w.orbs, ox = p.x + Math.cos(a) * 60, oy = p.y + Math.sin(a) * 60;
-    for (const e of g.enemies) if (e.oc <= 0 && Math.hypot(e.x - ox, e.y - oy) < e.r + 9) { e.hp -= w.orbDmg; e.oc = 0.4; }
+    for (const e of g.enemies) if (e.oc <= 0 && Math.hypot(e.x - ox, e.y - oy) < e.r + 9) { dealDamage(e, w.orbDmg); e.oc = 0.4; }
   }
 
   // Ennemis : poursuite du joueur et contact
@@ -406,6 +447,11 @@ function draw() {
     ctx.fillStyle = "#5a3d2b"; ctx.fillRect(l.x - 8, l.y - 5 + b, 16, 11);
     ctx.fillStyle = c; ctx.fillRect(l.x - 8, l.y - 5 + b, 16, 4); ctx.fillRect(l.x - 2, l.y - 2 + b, 4, 5);
   }
+  for (const f of g.flames) { // flammes du mage
+    const fl = (0.75 + 0.25 * Math.sin(g.t * 12 + f.x)) * Math.min(1, f.t);
+    ctx.fillStyle = "rgba(255,120,40," + 0.22 * fl + ")"; ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 6.283); ctx.fill();
+    ctx.fillStyle = "rgba(255,200,80," + 0.25 * fl + ")"; ctx.beginPath(); ctx.arc(f.x, f.y, f.r * 0.55, 0, 6.283); ctx.fill();
+  }
   for (const e of g.enemies) sprite(e);
   for (const z of g.zones) { // zone magique : le disque se remplit avant l’explosion
     const k = 1 - z.t / 0.4;
@@ -437,6 +483,12 @@ function draw() {
   ctx.fillStyle = "#8fe3ff"; ctx.fillText("Éclats : " + g.run + " (réserve " + bank + ")", 12, 66); ctx.fillStyle = "#f0eaf7";
   if (frag) { ctx.fillStyle = "#ff7a7a"; ctx.fillText("Fragments de boss : " + frag, 12, 84); ctx.fillStyle = "#f0eaf7"; }
   ctx.textAlign = "right"; ctx.fillText(fmt(g.t), W - 12, 30);
+  if (g.dashOn) { // bouton de dash (aussi : Espace ou Maj)
+    const bx = W - 50, by = H - 50, ready = g.dashCdT <= 0, k = ready ? 1 : 1 - g.dashCdT / g.dashCd;
+    ctx.fillStyle = "rgba(20,16,30,.55)"; ctx.beginPath(); ctx.arc(bx, by, 30, 0, 6.283); ctx.fill();
+    ctx.strokeStyle = ready ? "#d9c6ff" : "#6b5a90"; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(bx, by, 30, -Math.PI / 2, -Math.PI / 2 + 6.283 * k); ctx.stroke();
+    ctx.fillStyle = "#f0eaf7"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.fillText("DASH", bx, by + 4);
+  }
   if (g.msgT > 0) { ctx.textAlign = "center"; ctx.fillStyle = g.msgC || "#ff6a6a"; ctx.font = "bold 22px sans-serif"; ctx.fillText(g.msg, W / 2, 90); }
   let ns = null, nd = 1e9; // flèche vers l’éclat le plus proche s’il est hors écran
   for (const s of g.shards) { const d = Math.hypot(s.x - p.x, s.y - p.y); if (d < nd) { nd = d; ns = s; } }
@@ -457,9 +509,10 @@ const fmt = t => String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(Math
 function show(html) { ov.innerHTML = '<div class="card">' + html + "</div>"; ov.hidden = false; }
 function showMenu() {
   show("<h1>Veillée</h1><p>Joueur : <b>" + esc(meName) + "</b>" + (stats.parties ? " – " + stats.parties + " parties, record " + fmt(stats.meilleurTemps) + ", niveau " + stats.meilleurNiveau : "") + "</p><p>Survis à la nuit. Ton personnage tire tout seul : toi, tu t’occupes de bouger.</p>" +
-    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>. Ramasse ceux qui apparaissent sur la carte.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : "") + " <button id='who' class='alt'>Changer de joueur</button>");
+    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>. Ramasse ceux qui apparaissent sur la carte.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : "") + " <button id='who' class='alt'>Changer de joueur</button>" + (TEST_MODE ? " <button id='test' class='alt'>Outils de test</button>" : "")); // TEST
   document.getElementById("go").onclick = play;
   document.getElementById("who").onclick = showProfiles;
+  if (TEST_MODE) document.getElementById("test").onclick = showTestTools; // TEST
   if (has("armurerie")) document.getElementById("eq").onclick = showEquip;
   document.getElementById("town").onclick = showTown;
 }
@@ -511,7 +564,7 @@ function play() { if (has("taverne")) showClasses(); else startGame("base"); }
 async function startGame(cls) {
   try { await loadCity(); } catch (e) {} // état du camp à jour
   newGame(); g.state = "play"; ov.hidden = true;
-  g.xpOn = has("auberge"); g.lootOn = has("armurerie"); g.xpMul = 1;
+  g.xpOn = has("auberge"); g.lootOn = has("armurerie"); g.xpMul = 1; g.cls = CLASSES[cls] ? cls : "base";
   g.p.max += 10 * (town.maison || 0); // maison
   if (CLASSES[cls]) {
     applyClass(cls);
@@ -533,13 +586,13 @@ async function startGame(cls) {
 // ====== Écrans de niveau et de fin de partie ======
 function showLevelUp() {
   g.state = "levelup"; g.pending--;
-  const picks = UPGRADES.filter(u => !u.only || u.only.includes(g.w.mode)).sort(() => Math.random() - 0.5).slice(0, 3);
+  const picks = upgradePool().sort(() => Math.random() - 0.5).slice(0, 3);
   show("<h2>Niveau " + g.p.lvl + "</h2><p>Choisis une amélioration.</p>");
   const card = ov.firstChild;
   for (const u of picks) {
-    const b = document.createElement("button");
-    b.className = "opt"; b.innerHTML = "<b>" + u.n + "</b><span>" + u.d + "</span>";
-    b.onclick = () => { u.f(g); ov.hidden = true; g.state = "play"; };
+    const again = g.up[u.id] || 0, b = document.createElement("button");
+    b.className = "opt"; b.innerHTML = "<b>" + u.n + (again ? " (niv. " + (again + 1) + ")" : "") + "</b><span>" + (again && u.d2 ? u.d2 : u.d) + "</span>";
+    b.onclick = () => { g.up[u.id] = again + 1; u.f(g); ov.hidden = true; g.state = "play"; };
     card.appendChild(b);
   }
 }
@@ -766,6 +819,33 @@ async function showEquip(from) { // from : écran où revenir (la ville) ; sinon
   const back = document.createElement("button");
   back.textContent = "Retour"; back.onclick = typeof from === "function" ? from : leaveTown;
   card.appendChild(back);
+}
+
+// ====== OUTILS DE TEST (à supprimer avant d’ouvrir le jeu à tout le monde) ======
+// Le bouton « Outils de test » n’apparaît que si l’adresse du jeu se termine par ?test
+const TEST_MODE = /[?&]test\b/.test(location.search);
+let resetPending = false;
+function testAddFrag() { frag += 10; saveRemote(true); showTestTools(); }
+function testAddShards() { bank += 100; saveRemote(true); showTestTools(); }
+async function testReset() { // efface la sauvegarde du joueur actif (pas le camp commun)
+  if (!resetPending) { resetPending = true; return showTestTools(); }
+  resetPending = false;
+  try { await sb("/items?player_id=eq." + me, "DELETE"); } catch (e) { return showError(showTestTools); }
+  bank = 0; frag = 0; inv = []; town = { maison: 0 }; stats = {};
+  await saveRemote(true); showMenu();
+}
+function showTestTools() {
+  show("<h2>Outils de test</h2><p>Joueur : <b></b><br>Éclats de lune : " + bank + " · Fragments de boss : " + frag + "</p>");
+  const card = ov.firstChild;
+  card.querySelector("b").textContent = meName;
+  const add = (label, on, alt) => {
+    const b = document.createElement("button");
+    b.textContent = label; b.className = alt ? "alt" : ""; b.style.cssText = "margin:0 6px 8px 0"; b.onclick = on; card.appendChild(b);
+  };
+  add("+10 fragments de boss", testAddFrag);
+  add("+100 éclats de lune", testAddShards);
+  add(resetPending ? "Confirmer : tout effacer" : "Effacer toute ma sauvegarde", testReset, true);
+  add("Retour", () => { resetPending = false; showMenu(); }, true);
 }
 
 // ====== Boucle principale ======
