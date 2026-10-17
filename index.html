@@ -28,7 +28,7 @@ button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--acce
 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
 .alt{background:transparent;color:var(--ink);border-color:var(--line)}
 .card{max-height:100%;overflow:auto}
-.opt:disabled{opacity:.5;cursor:default}
+button:disabled{opacity:.5;cursor:default}
 .opt{display:block;width:100%;text-align:left;margin-bottom:8px;background:transparent;color:var(--ink);border:1px solid var(--line)}
 .opt:hover{border-color:var(--accent)}
 .opt b{display:block}
@@ -59,6 +59,34 @@ cv.addEventListener("pointermove", e => {
 });
 ["pointerup", "pointercancel"].forEach(n => cv.addEventListener(n, () => { stick = null; }));
 
+// ====== Équipements : raretés, emplacements, tirage ======
+const RAR = [
+  { n: "Commun", c: "#b8b8c8", m: 1, w: 60 }, { n: "Rare", c: "#5ab0ff", m: 1.6, w: 28 },
+  { n: "Épique", c: "#b66bff", m: 2.5, w: 10 }, { n: "Légendaire", c: "#ffb13b", m: 4, w: 2 }
+];
+const RAR_C = RAR.map(r => r.c);
+const SLOTS = {
+  arme: { l: "Arme", base: 8, u: " % de dégâts", names: ["Dague", "Épée", "Faux", "Arbalète"], st: "dmg" },
+  armure: { l: "Armure", base: 8, u: " PV", names: ["Gilet", "Cotte de mailles", "Cuirasse"], st: "hp" },
+  bottes: { l: "Bottes", base: 4, u: " % de vitesse", names: ["Sandales", "Bottes", "Jambières"], st: "speed" },
+  amulette: { l: "Amulette", base: 25, u: " d’aimant", names: ["Médaillon", "Talisman", "Croc"], st: "mag" }
+};
+const EPITHET = ["de fortune", "d’argent", "de la nuit", "du roi vampire"];
+function rollItem(boss) { // les boss ne lâchent jamais d’objet commun
+  const w = boss ? [0, 50, 38, 12] : RAR.map(r => r.w);
+  let x = Math.random() * w.reduce((a, b) => a + b), r = 0;
+  while (r < 3 && x >= w[r]) { x -= w[r]; r++; }
+  const slot = Object.keys(SLOTS)[Math.floor(Math.random() * 4)], S = SLOTS[slot];
+  const val = Math.round(S.base * RAR[r].m * (0.9 + Math.random() * 0.2));
+  return { kind: slot, r, st: S.st, val, name: S.names[Math.floor(Math.random() * S.names.length)] + " " + EPITHET[r] };
+}
+let lootP = Promise.resolve();
+function saveLoot() { // enregistre dans la base les objets trouvés pendant la partie
+  if (!g.found.length) return;
+  const rows = g.found.map(it => ({ player_id: me, kind: it.kind, data: { r: it.r, st: it.st, val: it.val, name: it.name } }));
+  lootP = sb("/items", "POST", rows, "return=representation").then(r => { inv.push(...r); }).catch(() => {});
+}
+
 // ====== Améliorations proposées à chaque niveau ======
 const UPGRADES = [
   { n: "Lame affûtée", d: "+25 % de dégâts", f: g => g.w.dmg *= 1.25 },
@@ -75,25 +103,24 @@ const UPGRADES = [
 // ====== Connexion à Supabase (base de données en ligne) ======
 const SB_URL = "https://dzfuhtcblzaygssydtbv.supabase.co/rest/v1";
 const SB_KEY = "sb_publishable_vSFxEvXCbP55trZHchKeoQ_SDma64LB"; // clé publique, faite pour être visible
-async function sb(path, method, body) {
-  const r = await fetch(SB_URL + path, {
-    method: method || "GET", keepalive: method === "PATCH",
-    headers: { apikey: SB_KEY, "Content-Type": "application/json", Prefer: "return=minimal" },
-    body: body ? JSON.stringify(body) : undefined
-  });
+async function sb(path, method, body, prefer) {
+  const h = { apikey: SB_KEY, "Content-Type": "application/json" };
+  if (prefer || method === "PATCH") h.Prefer = prefer || "return=minimal";
+  const r = await fetch(SB_URL + path, { method: method || "GET", keepalive: !!method && method !== "GET", headers: h, body: body ? JSON.stringify(body) : undefined });
   if (!r.ok) throw new Error(await r.text());
   return method === "PATCH" ? null : r.json();
 }
 const esc = t => String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
 // Données du joueur actif (chargées depuis la base)
-let me = -1, meName = "", bank = 0, stats = {}, players = [];
+let me = -1, meName = "", bank = 0, stats = {}, players = [], inv = []; // inv = équipements du joueur
 let town = { forge: 0, auberge: 0, ecuries: 0, biblio: 0 };
 let saveTimer = null;
 function saveRemote(now) { // enregistre éclats, ville et statistiques
   clearTimeout(saveTimer);
   const go = () => sb("/players?id=eq." + me, "PATCH", { shards: bank, town, stats, updated_at: new Date().toISOString() }).catch(() => {});
-  if (now) go(); else saveTimer = setTimeout(go, 1500);
+  if (now) return go();
+  saveTimer = setTimeout(go, 1500);
 }
 const saveBank = () => saveRemote(false);
 const saveTown = () => saveRemote(true);
@@ -104,6 +131,7 @@ async function loadProfile(i) {
   if (!rows[0]) throw new Error("profil introuvable");
   me = i; meName = rows[0].name; bank = rows[0].shards; stats = rows[0].stats || {};
   town = Object.assign({ forge: 0, auberge: 0, ecuries: 0, biblio: 0 }, rows[0].town);
+  inv = await sb("/items?player_id=eq." + i + "&select=*&order=id");
   try { localStorage.setItem("veillee_dernier", i); } catch (e) {} // le navigateur retient le dernier joueur
 }
 function endRun() { // met à jour les statistiques en fin de partie
@@ -111,6 +139,7 @@ function endRun() { // met à jour les statistiques en fin de partie
   stats.victimes = (stats.victimes || 0) + g.kills;
   stats.meilleurTemps = Math.max(stats.meilleurTemps || 0, Math.floor(g.t));
   stats.meilleurNiveau = Math.max(stats.meilleurNiveau || 0, g.p.lvl);
+  saveLoot();
   saveRemote(true);
 }
 function showError(retry) {
@@ -135,7 +164,7 @@ function newGame() {
   g = { state: "menu", t: 0, kills: 0, spawn: 0, cd: 0, ang: 0, pending: 0,
     p: { x: 0, y: 0, r: 12, hp: 100, max: 100, speed: 150, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
     w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0 },
-    enemies: [], shots: [], gems: [], shards: [], run: 0, nextBoss: 90, nextShard: 4, msg: "", msgT: 0 };
+    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], run: 0, nextBoss: 90, nextShard: 4, msg: "", msgT: 0 };
 }
 
 function spawnEnemy() {
@@ -172,7 +201,7 @@ function update(dt) {
     g.nextBoss += 90;
     const a = Math.random() * 6.283, d = Math.max(W, H) / 2 + 80, hp = 300 * (1 + g.t / 100);
     g.enemies.push({ x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d, r: 34, hp, max: hp, sp: 52, oc: 0, k: 3, boss: true, ph: 0 });
-    g.msg = "Un boss approche !"; g.msgT = 3;
+    g.msg = "Un boss approche !"; g.msgT = 3; g.msgC = null;
   }
   g.msgT -= dt;
   // Éclats de lune : apparaissent sur la carte, à ramasser à pied
@@ -183,6 +212,10 @@ function update(dt) {
   }
   for (const s of g.shards) if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + 14) { s.got = true; g.run++; bank++; saveBank(); }
   g.shards = g.shards.filter(s => !s.got && Math.hypot(s.x - p.x, s.y - p.y) < 1000);
+  for (const l of g.loot) if (Math.hypot(l.x - p.x, l.y - p.y) < p.r + 16) {
+    l.got = true; g.found.push(l.it); g.msg = "Trouvé : " + l.it.name; g.msgC = RAR_C[l.it.r]; g.msgT = 2.5;
+  }
+  g.loot = g.loot.filter(l => !l.got && Math.hypot(l.x - p.x, l.y - p.y) < 1400);
 
   // Tir automatique sur l’ennemi le plus proche
   g.cd -= dt;
@@ -227,6 +260,7 @@ function update(dt) {
   for (const e of g.enemies) if (e.hp <= 0) {
     g.gems.push({ x: e.x, y: e.y, v: e.boss ? 15 : e.r > 15 ? 3 : 1 }); g.kills++;
     if (e.boss) for (let i = 0; i < 3; i++) g.shards.push({ x: e.x + (i - 1) * 24, y: e.y, ph: i });
+    if (e.boss || Math.random() < 0.012) g.loot.push({ x: e.x, y: e.y + 10, it: rollItem(!!e.boss), ph: Math.random() * 6 });
   }
   g.enemies = g.enemies.filter(e => e.hp > 0);
 
@@ -235,7 +269,7 @@ function update(dt) {
     const dx = p.x - m.x, dy = p.y - m.y, d = Math.hypot(dx, dy) || 1;
     if (d < p.mag) { m.x += dx / d * 280 * dt; m.y += dy / d * 280 * dt; }
     if (d < p.r + 6) {
-      m.v = -m.v; p.xp += -m.v;
+      m.v = -m.v; p.xp += -m.v * (g.xpMul || 1);
       while (p.xp >= p.next) { p.xp -= p.next; p.lvl++; p.next = Math.floor(p.next * 1.35 + 3); g.pending++; }
     }
   }
@@ -336,6 +370,12 @@ function draw() {
     ctx.fillStyle = "#8fe3ff"; ctx.beginPath(); ctx.moveTo(s.x, s.y - 10 + b); ctx.lineTo(s.x + 7, s.y + b); ctx.lineTo(s.x, s.y + 10 + b); ctx.lineTo(s.x - 7, s.y + b); ctx.closePath(); ctx.fill();
   }
   for (const m of g.gems) { ctx.fillStyle = "#5fe0a0"; ctx.fillRect(m.x - 3, m.y - 3, 6, 6); }
+  for (const l of g.loot) { // coffres d’équipement, de la couleur de leur rareté
+    const c = RAR_C[l.it.r], b = Math.sin(g.t * 3 + l.ph) * 2;
+    ctx.fillStyle = c + "44"; ctx.beginPath(); ctx.arc(l.x, l.y + b, 15, 0, 6.283); ctx.fill();
+    ctx.fillStyle = "#5a3d2b"; ctx.fillRect(l.x - 8, l.y - 5 + b, 16, 11);
+    ctx.fillStyle = c; ctx.fillRect(l.x - 8, l.y - 5 + b, 16, 4); ctx.fillRect(l.x - 2, l.y - 2 + b, 4, 5);
+  }
   for (const e of g.enemies) sprite(e);
   ctx.fillStyle = "#ffe27a";
   for (const s of g.shots) { ctx.beginPath(); ctx.arc(s.x, s.y, 4, 0, 6.283); ctx.fill(); }
@@ -356,7 +396,7 @@ function draw() {
   ctx.fillText("Niv. " + p.lvl + "   Victimes : " + g.kills, 12, 48);
   ctx.fillStyle = "#8fe3ff"; ctx.fillText("Éclats : " + g.run + " (réserve " + bank + ")", 12, 66); ctx.fillStyle = "#f0eaf7";
   ctx.textAlign = "right"; ctx.fillText(fmt(g.t), W - 12, 30);
-  if (g.msgT > 0) { ctx.textAlign = "center"; ctx.fillStyle = "#ff6a6a"; ctx.font = "bold 22px sans-serif"; ctx.fillText(g.msg, W / 2, 90); }
+  if (g.msgT > 0) { ctx.textAlign = "center"; ctx.fillStyle = g.msgC || "#ff6a6a"; ctx.font = "bold 22px sans-serif"; ctx.fillText(g.msg, W / 2, 90); }
   let ns = null, nd = 1e9; // flèche vers l’éclat le plus proche s’il est hors écran
   for (const s of g.shards) { const d = Math.hypot(s.x - p.x, s.y - p.y); if (d < nd) { nd = d; ns = s; } }
   if (ns && (Math.abs(ns.x - p.x) > W / 2 - 10 || Math.abs(ns.y - p.y) > H / 2 - 10)) {
@@ -376,9 +416,10 @@ const fmt = t => String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(Math
 function show(html) { ov.innerHTML = '<div class="card">' + html + "</div>"; ov.hidden = false; }
 function showMenu() {
   show("<h1>Veillée</h1><p>Joueur : <b>" + esc(meName) + "</b>" + (stats.parties ? " – " + stats.parties + " parties, record " + fmt(stats.meilleurTemps) + ", niveau " + stats.meilleurNiveau : "") + "</p><p>Survis à la nuit. Ton personnage tire tout seul : toi, tu t’occupes de bouger.</p>" +
-    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>. Ramasse ceux qui apparaissent sur la carte.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button> <button id='who' class='alt'>Changer de joueur</button>");
+    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>. Ramasse ceux qui apparaissent sur la carte.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button> <button id='eq' class='alt'>Équipement</button> <button id='who' class='alt'>Changer de joueur</button>");
   document.getElementById("go").onclick = startGame;
   document.getElementById("who").onclick = showProfiles;
+  document.getElementById("eq").onclick = showEquip;
   document.getElementById("town").onclick = showTown;
 }
 function startGame() {
@@ -388,6 +429,15 @@ function startGame() {
   g.p.max += 10 * town.auberge; g.p.hp = g.p.max;
   g.p.speed *= 1 + 0.05 * town.ecuries;
   g.p.mag += 20 * town.biblio;
+  g.xpMul = 1 + 0.05 * (town.autel || 0);
+  const eq = stats.equip || {}; // bonus des équipements portés
+  for (const it of inv) if (eq[it.kind] === it.id) {
+    const v = it.data.val, t = it.data.st;
+    if (t === "dmg") g.w.dmg *= 1 + v / 100;
+    else if (t === "hp") { g.p.max += v; g.p.hp = g.p.max; }
+    else if (t === "speed") g.p.speed *= 1 + v / 100;
+    else if (t === "mag") g.p.mag += v;
+  }
 }
 
 // ====== La ville : on y dépense les éclats de lune ======
@@ -395,42 +445,86 @@ const BUILDINGS = [
   { k: "forge", n: "Forge", d: "+10 % de dégâts par niveau", max: 8 },
   { k: "auberge", n: "Auberge", d: "+10 PV de départ par niveau", max: 8 },
   { k: "ecuries", n: "Écuries", d: "+5 % de vitesse par niveau", max: 8 },
-  { k: "biblio", n: "Bibliothèque", d: "Les gemmes viennent de plus loin", max: 6 }
+  { k: "biblio", n: "Bibliothèque", d: "Les gemmes viennent de plus loin", max: 6 },
+  { k: "autel", n: "Autel de lune", d: "+5 % d’expérience gagnée par niveau", max: 5, city: true } // débloqué par le chantier commun
 ];
-const SKYLINE = '<svg viewBox="0 0 300 70" width="100%" aria-hidden="true" style="border-radius:8px;margin-bottom:10px"><rect width="300" height="70" fill="#1b1726"/><circle cx="250" cy="20" r="11" fill="#e8e4f5"/>' +
-  '<path d="M20 70V40l20-14 20 14v30z" fill="#3a3350"/><path d="M75 70V30h26v40z" fill="#4b4366"/><path d="M75 30l13-14 13 14z" fill="#8e2a3a"/>' +
-  '<path d="M125 70V45l18-12 18 12v25z" fill="#3a3350"/><path d="M180 70V36h40v34z" fill="#4b4366"/><rect x="92" y="46" width="5" height="7" fill="#ffe27a"/><rect x="138" y="50" width="6" height="8" fill="#ffe27a"/><rect x="195" y="44" width="6" height="8" fill="#ffe27a"/></svg>';
-function showTown() {
-  show("<h2>La ville</h2>" + SKYLINE + "<p>Éclats de lune : <b>" + bank + "</b>. Chaque amélioration est permanente.</p>");
+function skyline(built) {
+  return '<svg viewBox="0 0 300 70" width="100%" aria-hidden="true" style="border-radius:8px;margin-bottom:10px"><rect width="300" height="70" fill="#1b1726"/><circle cx="250" cy="20" r="11" fill="#e8e4f5"/>' +
+    '<path d="M20 70V40l20-14 20 14v30z" fill="#3a3350"/><path d="M75 70V30h26v40z" fill="#4b4366"/><path d="M75 30l13-14 13 14z" fill="#8e2a3a"/>' +
+    '<path d="M125 70V45l18-12 18 12v25z" fill="#3a3350"/><path d="M180 70V36h40v34z" fill="#4b4366"/><rect x="92" y="46" width="5" height="7" fill="#ffe27a"/><rect x="138" y="50" width="6" height="8" fill="#ffe27a"/><rect x="195" y="44" width="6" height="8" fill="#ffe27a"/>' +
+    (built ? '<path d="M268 70V32l11-14 11 14v38z" fill="#7a6bb0"/><rect x="276" y="40" width="6" height="8" fill="#8fe3ff"/>' : '') + '</svg>';
+}
+async function showTown() {
+  show("<h2>La ville</h2><p>Chargement…</p>");
+  let city = null; const names = {};
+  try { city = (await sb("/city?id=eq.1&select=*"))[0] || null; } catch (e) {}
+  try { for (const pl of await sb("/players?select=id,name")) names[pl.id] = pl.name; } catch (e) {}
+  const built = !!city && city.funded >= city.cost;
+  show("<h2>La ville</h2>" + skyline(built) + "<p>Éclats de lune : <b>" + bank + "</b>. Chaque amélioration est permanente.</p>");
   const card = ov.firstChild;
+  if (city) { // chantier commun à tous les joueurs
+    const box = document.createElement("div");
+    box.style.cssText = "border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:10px";
+    const top = Object.entries(city.contrib || {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id, v]) => esc(names[id] || "?") + " (" + v + ")").join(", ");
+    const pct = Math.min(100, Math.round(100 * city.funded / city.cost));
+    box.innerHTML = built
+      ? "<b>" + esc(city.name) + " : construit !</b><p style='margin:6px 0 0'>Grâce à tous les joueurs" + (top ? " : " + top : "") + ".</p>"
+      : "<b>Chantier commun : " + esc(city.name) + "</b><p style='margin:6px 0'>" + city.funded + " / " + city.cost + " éclats. Chacun peut donner autant qu’il veut." + (top ? " Mécènes : " + top + "." : "") + "</p>" +
+        "<div style='height:8px;background:var(--line);border-radius:4px;margin-bottom:10px'><div style='height:8px;width:" + pct + "%;background:var(--accent);border-radius:4px'></div></div>";
+    if (!built) for (const n of [5, 25, Infinity]) {
+      const amount = Math.min(n, bank, city.cost - city.funded);
+      const b = document.createElement("button");
+      b.className = "alt"; b.style.marginRight = "6px"; b.style.marginBottom = "6px";
+      b.textContent = n === Infinity ? "Tout donner (" + amount + ")" : "Donner " + n;
+      b.disabled = amount <= 0 || (n !== Infinity && bank < n);
+      b.onclick = async () => {
+        try {
+          await saveRemote(true); // envoie d’abord les éclats ramassés
+          const res = await sb("/rpc/donate", "POST", { p_player: me, p_amount: amount });
+          bank -= res.given;
+        } catch (e) { return showError(showTown); }
+        showTown();
+      };
+      box.appendChild(b);
+    }
+    card.appendChild(box);
+  }
   for (const b of BUILDINGS) {
-    const lv = town[b.k], full = lv >= b.max, cost = Math.round(5 * 1.5 ** lv);
+    if (b.city && !built) continue;
+    const lv = town[b.k] || 0, full = lv >= b.max, cost = Math.round(5 * 1.5 ** lv);
     const btn = document.createElement("button");
     btn.className = "opt"; btn.disabled = full || bank < cost;
     btn.innerHTML = "<b>" + b.n + " (niv. " + lv + "/" + b.max + ")</b><span>" + b.d + " – " + (full ? "niveau max" : cost + " éclats") + "</span>";
-    btn.onclick = () => { bank -= cost; town[b.k]++; saveBank(); saveTown(); showTown(); };
+    btn.onclick = () => { bank -= cost; town[b.k] = lv + 1; saveRemote(true); showTown(); };
     card.appendChild(btn);
   }
   const back = document.createElement("button");
   back.textContent = "Retour"; back.onclick = () => (g.state === "over" ? showOver() : showMenu());
   card.appendChild(back);
 }
-function showLevelUp() {
-  g.state = "levelup"; g.pending--;
-  const picks = UPGRADES.slice().sort(() => Math.random() - 0.5).slice(0, 3);
-  show("<h2>Niveau " + g.p.lvl + "</h2><p>Choisis une amélioration.</p>");
+
+// ====== Équipement : choisir ce qu’on porte (un objet par emplacement) ======
+async function showEquip() {
+  await lootP;
+  const eq = stats.equip || (stats.equip = {});
+  const worn = Object.keys(SLOTS).map(k => { const it = inv.find(x => x.id === eq[k]); return SLOTS[k].l + " : " + (it ? it.data.name : "vide"); }).join(" · ");
+  show("<h2>Équipement</h2><p>Les bonus s’appliquent à la prochaine partie.</p><p style='font-size:.9rem'></p>");
   const card = ov.firstChild;
-  for (const u of picks) {
+  card.querySelector("p:last-child").textContent = worn;
+  if (!inv.length) card.insertAdjacentHTML("beforeend", "<p>Aucun équipement pour l’instant : ils tombent des ennemis et des boss.</p>");
+  for (const it of inv.slice().sort((a, b) => b.data.r - a.data.r || a.kind.localeCompare(b.kind))) {
+    const on = eq[it.kind] === it.id, R = RAR[it.data.r], S = SLOTS[it.kind];
     const b = document.createElement("button");
-    b.className = "opt"; b.innerHTML = "<b>" + u.n + "</b><span>" + u.d + "</span>";
-    b.onclick = () => { u.f(g); ov.hidden = true; g.state = "play"; };
+    b.className = "opt"; b.style.borderLeft = "6px solid " + R.c;
+    b.innerHTML = "<b></b><span></span>";
+    b.firstChild.textContent = (on ? "✓ " : "") + it.data.name;
+    b.lastChild.textContent = R.n + " · " + S.l + " · +" + it.data.val + S.u + (on ? " (porté : cliquer pour retirer)" : "");
+    b.onclick = () => { if (on) delete eq[it.kind]; else eq[it.kind] = it.id; saveRemote(true); showEquip(); };
     card.appendChild(b);
   }
-}
-function showOver() {
-  show("<h2>Tu es tombé</h2><p>Tu as tenu " + fmt(g.t) + ", niveau " + g.p.lvl + ", avec " + g.kills + " victimes.</p><p>Éclats de lune ramassés : <b>" + g.run + "</b> (réserve : " + bank + ")</p><button id='again'>Rejouer</button> <button id='town' class='alt'>La ville</button>");
-  document.getElementById("again").onclick = startGame;
-  document.getElementById("town").onclick = showTown;
+  const back = document.createElement("button");
+  back.textContent = "Retour"; back.onclick = () => (g.state === "over" ? showOver() : showMenu());
+  card.appendChild(back);
 }
 
 // ====== Boucle principale ======
