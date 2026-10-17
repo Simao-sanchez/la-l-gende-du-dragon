@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Veillée – prototype survivor</title>
+<style>
+:root{
+  --bg:#ece7f2; --ink:#1f1a2b; --card:#ffffff; --muted:#6b6280; --accent:#7a3cc9; --line:#d6cde3;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){--bg:#120e1b;--ink:#f0eaf7;--card:#1e1830;--muted:#a79bc0;--accent:#b88af0;--line:#3a2f55}
+}
+:root[data-theme="dark"]{--bg:#120e1b;--ink:#f0eaf7;--card:#1e1830;--muted:#a79bc0;--accent:#b88af0;--line:#3a2f55}
+html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px)}
+body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif;overflow:hidden}
+#game{position:relative;width:100%;height:100%}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+#ov{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(10,6,18,.6);padding:16px;box-sizing:border-box}
+#ov[hidden]{display:none}
+.card{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:22px;max-width:420px;width:100%;box-sizing:border-box}
+.card h1,.card h2{margin:0 0 8px;font-family:Georgia,"Times New Roman",serif;font-size:1.7rem}
+.card p{margin:0 0 14px;color:var(--muted);line-height:1.5}
+button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;padding:10px 18px}
+button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.alt{background:transparent;color:var(--ink);border-color:var(--line)}
+.card{max-height:100%;overflow:auto}
+.opt:disabled{opacity:.5;cursor:default}
+.opt{display:block;width:100%;text-align:left;margin-bottom:8px;background:transparent;color:var(--ink);border:1px solid var(--line)}
+.opt:hover{border-color:var(--accent)}
+.opt b{display:block}
+.opt span{color:var(--muted);font-size:.9rem}
+</style>
+</head>
+<body>
+<div id="game"><canvas id="cv"></canvas><div id="ov"></div></div>
+<script>
+// ====== Mise en place du canvas ======
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d"), ov = document.getElementById("ov");
+let W = 0, H = 0;
+function resize(){ const r = cv.parentElement.getBoundingClientRect(); W = cv.width = r.width; H = cv.height = r.height; }
+addEventListener("resize", resize); resize();
+
+// ====== Contrôles : clavier (ZQSD / WASD / flèches) et glisser du doigt ======
+const keys = {};
+addEventListener("keydown", e => { const k = e.key.toLowerCase(); keys[k] = true; if (k.startsWith("arrow")) e.preventDefault(); });
+addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+let stick = null;
+cv.addEventListener("pointerdown", e => { const r = cv.getBoundingClientRect(); stick = { ox: e.clientX - r.left, oy: e.clientY - r.top, x: 0, y: 0, l: r.left, t: r.top }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointermove", e => {
+  if (!stick) return;
+  let dx = e.clientX - stick.l - stick.ox, dy = e.clientY - stick.t - stick.oy;
+  const d = Math.hypot(dx, dy), m = 50;
+  if (d > m) { dx = dx / d * m; dy = dy / d * m; }
+  stick.x = dx / m; stick.y = dy / m;
+});
+["pointerup", "pointercancel"].forEach(n => cv.addEventListener(n, () => { stick = null; }));
+
+// ====== Améliorations proposées à chaque niveau ======
+const UPGRADES = [
+  { n: "Lame affûtée", d: "+25 % de dégâts", f: g => g.w.dmg *= 1.25 },
+  { n: "Mains rapides", d: "Tire 20 % plus vite", f: g => g.w.rate *= 0.8 },
+  { n: "Tir multiple", d: "+1 projectile", f: g => g.w.count++ },
+  { n: "Orbe gardienne", d: "+1 orbe qui tourne autour de toi", f: g => g.w.orbs++ },
+  { n: "Traversée", d: "Les tirs percent +1 ennemi", f: g => g.w.pierce++ },
+  { n: "Bottes légères", d: "+15 % de vitesse", f: g => g.p.speed *= 1.15 },
+  { n: "Aimant", d: "Ramasse les gemmes de plus loin", f: g => g.p.mag += 50 },
+  { n: "Festin", d: "+20 PV max et soin de 40 PV", f: g => { g.p.max += 20; g.p.hp = Math.min(g.p.max, g.p.hp + 40); } }
+];
+
+// ====== État du jeu ======
+// ====== Connexion à Supabase (base de données en ligne) ======
+const SB_URL = "https://dzfuhtcblzaygssydtbv.supabase.co/rest/v1";
+const SB_KEY = "sb_publishable_vSFxEvXCbP55trZHchKeoQ_SDma64LB"; // clé publique, faite pour être visible
+async function sb(path, method, body) {
+  const r = await fetch(SB_URL + path, {
+    method: method || "GET", keepalive: method === "PATCH",
+    headers: { apikey: SB_KEY, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return method === "PATCH" ? null : r.json();
+}
+const esc = t => String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+// Données du joueur actif (chargées depuis la base)
+let me = -1, meName = "", bank = 0, stats = {}, players = [];
+let town = { forge: 0, auberge: 0, ecuries: 0, biblio: 0 };
+let saveTimer = null;
+function saveRemote(now) { // enregistre éclats, ville et statistiques
+  clearTimeout(saveTimer);
+  const go = () => sb("/players?id=eq." + me, "PATCH", { shards: bank, town, stats, updated_at: new Date().toISOString() }).catch(() => {});
+  if (now) go(); else saveTimer = setTimeout(go, 1500);
+}
+const saveBank = () => saveRemote(false);
+const saveTown = () => saveRemote(true);
+addEventListener("pagehide", () => { if (me >= 0) saveRemote(true); });
+
+async function loadProfile(i) {
+  const rows = await sb("/players?id=eq." + i + "&select=*");
+  if (!rows[0]) throw new Error("profil introuvable");
+  me = i; meName = rows[0].name; bank = rows[0].shards; stats = rows[0].stats || {};
+  town = Object.assign({ forge: 0, auberge: 0, ecuries: 0, biblio: 0 }, rows[0].town);
+  try { localStorage.setItem("veillee_dernier", i); } catch (e) {} // le navigateur retient le dernier joueur
+}
+function endRun() { // met à jour les statistiques en fin de partie
+  stats.parties = (stats.parties || 0) + 1;
+  stats.victimes = (stats.victimes || 0) + g.kills;
+  stats.meilleurTemps = Math.max(stats.meilleurTemps || 0, Math.floor(g.t));
+  stats.meilleurNiveau = Math.max(stats.meilleurNiveau || 0, g.p.lvl);
+  saveRemote(true);
+}
+function showError(retry) {
+  show("<h2>Connexion impossible</h2><p>Le jeu n’arrive pas à joindre la base de données. Vérifie ta connexion, puis réessaie.</p><button id='retry'>Réessayer</button>");
+  document.getElementById("retry").onclick = retry;
+}
+async function showProfiles() {
+  show("<h1>Veillée</h1><p>Chargement…</p>");
+  try { players = await sb("/players?select=id,name,shards&order=id"); } catch (e) { return showError(showProfiles); }
+  show("<h1>Veillée</h1><p>Qui joue ?</p>");
+  const card = ov.firstChild;
+  for (const pl of players) {
+    const b = document.createElement("button");
+    b.className = "opt"; b.innerHTML = "<b></b><span>" + pl.shards + " éclats de lune</span>"; b.firstChild.textContent = pl.name;
+    b.onclick = async () => { try { await loadProfile(pl.id); showMenu(); } catch (e) { showError(showProfiles); } };
+    card.appendChild(b);
+  }
+}
+
+let g;
+function newGame() {
+  g = { state: "menu", t: 0, kills: 0, spawn: 0, cd: 0, ang: 0, pending: 0,
+    p: { x: 0, y: 0, r: 12, hp: 100, max: 100, speed: 150, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
+    w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0 },
+    enemies: [], shots: [], gems: [], shards: [], run: 0, nextBoss: 90, nextShard: 4, msg: "", msgT: 0 };
+}
+
+function spawnEnemy() {
+  const a = Math.random() * 6.283, d = Math.max(W, H) / 2 + 40, r = Math.random();
+  const type = (g.t > 60 && r < 0.15) ? 2 : (g.t > 25 && r < 0.4) ? 1 : 0;
+  const T = [{ r: 10, hp: 15, sp: 60, c: "#e05a5a" }, { r: 8, hp: 9, sp: 115, c: "#e8a838" }, { r: 18, hp: 70, sp: 42, c: "#a35ae0" }][type];
+  g.enemies.push({ x: g.p.x + Math.cos(a) * d, y: g.p.y + Math.sin(a) * d, r: T.r, hp: T.hp * (1 + g.t / 90), sp: T.sp * (0.9 + Math.random() * 0.2), c: T.c, oc: 0, k: type, ph: Math.random() * 6 });
+}
+
+// ====== Mise à jour (appelée à chaque image) ======
+function update(dt) {
+  const p = g.p, w = g.w;
+  g.t += dt; p.inv -= dt; g.ang += dt * 3;
+
+  // Déplacement du joueur
+  let mx = (keys.d || keys.arrowright ? 1 : 0) - (keys.q || keys.a || keys.arrowleft ? 1 : 0);
+  let my = (keys.s || keys.arrowdown ? 1 : 0) - (keys.z || keys.w || keys.arrowup ? 1 : 0);
+  if (stick) { mx += stick.x; my += stick.y; }
+  const l = Math.hypot(mx, my);
+  if (l > 1) { mx /= l; my /= l; }
+  p.x += mx * p.speed * dt; p.y += my * p.speed * dt;
+  p.mov = !!(mx || my); if (mx) p.face = mx > 0 ? 1 : -1;
+
+  // Apparition des ennemis : de plus en plus nombreux avec le temps
+  g.spawn -= dt;
+  if (g.spawn <= 0 && g.enemies.length < 300) {
+    g.spawn = Math.max(0.12, 0.8 - g.t / 150);
+    const n = 1 + Math.floor(g.t / 45);
+    for (let i = 0; i < n; i++) spawnEnemy();
+  }
+
+  // Boss toutes les 90 secondes
+  if (g.t >= g.nextBoss) {
+    g.nextBoss += 90;
+    const a = Math.random() * 6.283, d = Math.max(W, H) / 2 + 80, hp = 300 * (1 + g.t / 100);
+    g.enemies.push({ x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d, r: 34, hp, max: hp, sp: 52, oc: 0, k: 3, boss: true, ph: 0 });
+    g.msg = "Un boss approche !"; g.msgT = 3;
+  }
+  g.msgT -= dt;
+  // Éclats de lune : apparaissent sur la carte, à ramasser à pied
+  g.nextShard -= dt;
+  if (g.nextShard <= 0 && g.shards.length < 5) {
+    g.nextShard = 6; const a = Math.random() * 6.283, d = 220 + Math.random() * 280;
+    g.shards.push({ x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d, ph: Math.random() * 6 });
+  }
+  for (const s of g.shards) if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + 14) { s.got = true; g.run++; bank++; saveBank(); }
+  g.shards = g.shards.filter(s => !s.got && Math.hypot(s.x - p.x, s.y - p.y) < 1000);
+
+  // Tir automatique sur l’ennemi le plus proche
+  g.cd -= dt;
+  if (g.cd <= 0) {
+    let best = null, bd = 420 * 420;
+    for (const e of g.enemies) { const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2; if (d2 < bd) { bd = d2; best = e; } }
+    if (best) {
+      const base = Math.atan2(best.y - p.y, best.x - p.x);
+      for (let i = 0; i < w.count; i++) {
+        const a = base + (i - (w.count - 1) / 2) * 0.18;
+        g.shots.push({ x: p.x, y: p.y, vx: Math.cos(a) * 380, vy: Math.sin(a) * 380, life: 1.2, pl: w.pierce, hit: [] });
+      }
+      g.cd = w.rate;
+    }
+  }
+
+  // Projectiles
+  for (const s of g.shots) {
+    s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+    for (const e of g.enemies) {
+      if (s.pl < 0) break;
+      if (s.hit.includes(e)) continue;
+      if (Math.hypot(e.x - s.x, e.y - s.y) < e.r + 4) { e.hp -= w.dmg; s.hit.push(e); s.pl--; }
+    }
+  }
+  g.shots = g.shots.filter(s => s.life > 0 && s.pl >= 0);
+
+  // Orbes qui tournent autour du joueur
+  for (let i = 0; i < w.orbs; i++) {
+    const a = g.ang + i * 6.283 / w.orbs, ox = p.x + Math.cos(a) * 60, oy = p.y + Math.sin(a) * 60;
+    for (const e of g.enemies) if (e.oc <= 0 && Math.hypot(e.x - ox, e.y - oy) < e.r + 9) { e.hp -= w.orbDmg; e.oc = 0.4; }
+  }
+
+  // Ennemis : poursuite du joueur et contact
+  for (const e of g.enemies) {
+    e.oc -= dt;
+    const dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy) || 1;
+    e.x += dx / d * e.sp * dt; e.y += dy / d * e.sp * dt;
+    if (d < e.r + p.r && p.inv <= 0) { p.hp -= (e.boss ? 18 : 8) + g.t / 60; p.inv = 0.5; }
+  }
+  // Mort des ennemis : ils laissent une gemme d’expérience
+  for (const e of g.enemies) if (e.hp <= 0) {
+    g.gems.push({ x: e.x, y: e.y, v: e.boss ? 15 : e.r > 15 ? 3 : 1 }); g.kills++;
+    if (e.boss) for (let i = 0; i < 3; i++) g.shards.push({ x: e.x + (i - 1) * 24, y: e.y, ph: i });
+  }
+  g.enemies = g.enemies.filter(e => e.hp > 0);
+
+  // Gemmes : aimant et ramassage
+  for (const m of g.gems) {
+    const dx = p.x - m.x, dy = p.y - m.y, d = Math.hypot(dx, dy) || 1;
+    if (d < p.mag) { m.x += dx / d * 280 * dt; m.y += dy / d * 280 * dt; }
+    if (d < p.r + 6) {
+      m.v = -m.v; p.xp += -m.v;
+      while (p.xp >= p.next) { p.xp -= p.next; p.lvl++; p.next = Math.floor(p.next * 1.35 + 3); g.pending++; }
+    }
+  }
+  g.gems = g.gems.filter(m => m.v > 0);
+
+  if (p.hp <= 0) { p.hp = 0; g.state = "over"; endRun(); showOver(); }
+  else if (g.pending > 0) showLevelUp();
+}
+
+// ====== Sprites dessinés au pinceau (canvas) ======
+function eyes(dx, dy, s, c) {
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.arc(-dx, dy, s, 0, 6.283); ctx.fill();
+  ctx.beginPath(); ctx.arc(dx, dy, s, 0, 6.283); ctx.fill();
+}
+function sprite(e) {
+  const r = e.r, f = Math.sin(g.t * 8 + e.ph), face = g.p.x < e.x ? -1 : 1;
+  ctx.save(); ctx.translate(e.x, e.y);
+  ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(0, r * 0.9, r * 0.9, r * 0.35, 0, 0, 6.283); ctx.fill();
+  if (e.boss) drawBoss(e, f, face);
+  else if (e.k === 1) { // chauve-souris
+    ctx.fillStyle = "#4b3a66";
+    ctx.beginPath(); ctx.ellipse(0, 0, r * 0.6, r * 0.7, 0, 0, 6.283); ctx.fill();
+    for (const s of [-1, 1]) { ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(s * r * 2, -r * (0.8 + f * 0.8), s * r * 2.2, r * 0.4); ctx.quadraticCurveTo(s * r, r * 0.1, 0, r * 0.6); ctx.fill(); }
+    eyes(r * 0.25, -r * 0.15, r * 0.15, "#ffcf5a");
+  } else if (e.k === 2) { // brute
+    ctx.fillStyle = "#4e2a78"; ctx.fillRect(-r * 1.3, -r * 0.3 + f * 2, r * 0.4, r * 1.1); ctx.fillRect(r * 0.9, -r * 0.3 - f * 2, r * 0.4, r * 1.1);
+    ctx.fillStyle = "#6e3fa0"; ctx.beginPath(); ctx.roundRect(-r, -r, r * 2, r * 2, r * 0.45); ctx.fill();
+    eyes(r * 0.4, -r * 0.25, r * 0.14, "#ff5a5a");
+  } else { // fantôme
+    ctx.fillStyle = "#eadcf0"; ctx.beginPath(); ctx.arc(0, -r * 0.1, r, Math.PI, 0); ctx.lineTo(r, r);
+    for (let i = 0; i < 3; i++) ctx.quadraticCurveTo(r - (i * 2 + 1) * r / 3, r * (1.5 + f * 0.3), r - (i + 1) * r * 2 / 3, r);
+    ctx.closePath(); ctx.fill();
+    eyes(r * 0.35, -r * 0.2, r * 0.18, "#2a2040");
+  }
+  ctx.restore();
+}
+function drawBoss(e, f, face) {
+  const r = e.r;
+  ctx.translate(0, f * 2 - r * 0.2);
+  ctx.fillStyle = "#2a1540"; ctx.beginPath(); ctx.moveTo(0, -r * 0.9); ctx.lineTo(r * 1.1, r);
+  for (let i = 0; i < 5; i++) { ctx.lineTo(r * 1.1 - (i + 0.5) * r * 0.44, r * 0.7); ctx.lineTo(r * 1.1 - (i + 1) * r * 0.44, r); }
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "#8a7a5a"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(face * r, r * 0.9); ctx.lineTo(face * r, -r * 1.3); ctx.stroke();
+  ctx.strokeStyle = "#cfd6e6"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(face * r, -r * 1.3); ctx.quadraticCurveTo(face * r * 0.6, -r * 1.7, face * r * 0.2, -r * 1.35); ctx.stroke();
+  ctx.fillStyle = "#e9e2d0"; ctx.beginPath(); ctx.arc(0, -r * 0.5, r * 0.48, 0, 6.283); ctx.fill();
+  ctx.fillStyle = "#c43a3a";
+  ctx.beginPath(); ctx.moveTo(-r * 0.4, -r * 0.8); ctx.lineTo(-r * 0.7, -r * 1.3); ctx.lineTo(-r * 0.1, -r * 0.95); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(r * 0.4, -r * 0.8); ctx.lineTo(r * 0.7, -r * 1.3); ctx.lineTo(r * 0.1, -r * 0.95); ctx.fill();
+  eyes(r * 0.2, -r * 0.5, r * 0.1, "#ff2a2a");
+  ctx.fillStyle = "#3a2f55"; ctx.fillRect(-r, -r * 2.1, r * 2, 5);
+  ctx.fillStyle = "#e05a5a"; ctx.fillRect(-r, -r * 2.1, r * 2 * Math.max(0, e.hp) / e.max, 5);
+}
+function drawHero(p) {
+  const s = p.face || 1;
+  ctx.save(); ctx.translate(p.x, p.y + (p.mov ? Math.sin(g.t * 14) * 1.5 : 0));
+  ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(0, 13, 10, 4, 0, 0, 6.283); ctx.fill();
+  ctx.fillStyle = "#8e2a3a"; ctx.beginPath(); ctx.moveTo(-s * 4, -4); ctx.lineTo(-s * 17, 13); ctx.lineTo(-s * 2, 13); ctx.fill();
+  ctx.fillStyle = "#5a4a8a"; ctx.fillRect(-7, -4, 14, 16);
+  ctx.fillStyle = "#f0d4b8"; ctx.beginPath(); ctx.arc(0, -9, 7, 0, 6.283); ctx.fill();
+  ctx.fillStyle = "#2a2040"; ctx.beginPath(); ctx.arc(0, -11, 7.5, Math.PI, 0); ctx.fill();
+  ctx.fillRect(s * 2 - 1, -9, 2, 3);
+  ctx.restore();
+}
+function decor(cx, cy) { // pierres tombales et touffes d’herbe, placées par un calcul fixe
+  const cs = 150;
+  for (let i = Math.floor(cx / cs) - 1; i <= (cx + W) / cs; i++)
+    for (let j = Math.floor(cy / cs) - 1; j <= (cy + H) / cs; j++) {
+      const h = Math.abs(Math.sin(i * 127.1 + j * 311.7) * 43758.5) % 1;
+      if (h > 0.45) continue;
+      const x = i * cs + ((h * 9973) % 1) * cs, y = j * cs + ((h * 7919) % 1) * cs;
+      if (h < 0.2) {
+        ctx.fillStyle = "#3a3350"; ctx.beginPath(); ctx.roundRect(x - 8, y - 14, 16, 20, [8, 8, 2, 2]); ctx.fill();
+        ctx.fillStyle = "#4b4366"; ctx.fillRect(x - 1, y - 11, 2, 9); ctx.fillRect(x - 4, y - 8, 8, 2);
+      } else {
+        ctx.strokeStyle = "#2c3a3a"; ctx.lineWidth = 2; ctx.beginPath();
+        for (let k = -1; k <= 1; k++) { ctx.moveTo(x + k * 4, y); ctx.lineTo(x + k * 6, y - 8); }
+        ctx.stroke();
+      }
+    }
+}
+
+// ====== Dessin ======
+function draw() {
+  const p = g.p, cx = p.x - W / 2, cy = p.y - H / 2;
+  ctx.fillStyle = "#1b1726"; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = "#282139"; ctx.lineWidth = 1; ctx.beginPath();
+  const gs = 64, ox = -(((cx % gs) + gs) % gs), oy = -(((cy % gs) + gs) % gs);
+  for (let x = ox; x < W; x += gs) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = oy; y < H; y += gs) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
+  ctx.save(); ctx.translate(-cx, -cy);
+  decor(cx, cy);
+  for (const s of g.shards) { // éclats de lune
+    const b = Math.sin(g.t * 3 + s.ph) * 3;
+    ctx.fillStyle = "rgba(120,200,255,.25)"; ctx.beginPath(); ctx.arc(s.x, s.y + b, 16, 0, 6.283); ctx.fill();
+    ctx.fillStyle = "#8fe3ff"; ctx.beginPath(); ctx.moveTo(s.x, s.y - 10 + b); ctx.lineTo(s.x + 7, s.y + b); ctx.lineTo(s.x, s.y + 10 + b); ctx.lineTo(s.x - 7, s.y + b); ctx.closePath(); ctx.fill();
+  }
+  for (const m of g.gems) { ctx.fillStyle = "#5fe0a0"; ctx.fillRect(m.x - 3, m.y - 3, 6, 6); }
+  for (const e of g.enemies) sprite(e);
+  ctx.fillStyle = "#ffe27a";
+  for (const s of g.shots) { ctx.beginPath(); ctx.arc(s.x, s.y, 4, 0, 6.283); ctx.fill(); }
+  for (let i = 0; i < g.w.orbs; i++) {
+    const a = g.ang + i * 6.283 / g.w.orbs;
+    ctx.fillStyle = "#9fd8ff"; ctx.beginPath(); ctx.arc(p.x + Math.cos(a) * 60, p.y + Math.sin(a) * 60, 9, 0, 6.283); ctx.fill();
+  }
+  ctx.globalAlpha = p.inv > 0 && Math.floor(g.t * 20) % 2 ? 0.4 : 1;
+  drawHero(p);
+  ctx.globalAlpha = 1; ctx.restore();
+
+  // Interface : barre d’XP, PV, temps
+  ctx.fillStyle = "#3a2f55"; ctx.fillRect(0, 0, W, 8);
+  ctx.fillStyle = "#5fe0a0"; ctx.fillRect(0, 0, W * p.xp / p.next, 8);
+  ctx.fillStyle = "#3a2f55"; ctx.fillRect(12, 18, 140, 12);
+  ctx.fillStyle = "#e05a5a"; ctx.fillRect(12, 18, 140 * Math.max(0, p.hp) / p.max, 12);
+  ctx.fillStyle = "#f0eaf7"; ctx.font = "14px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("Niv. " + p.lvl + "   Victimes : " + g.kills, 12, 48);
+  ctx.fillStyle = "#8fe3ff"; ctx.fillText("Éclats : " + g.run + " (réserve " + bank + ")", 12, 66); ctx.fillStyle = "#f0eaf7";
+  ctx.textAlign = "right"; ctx.fillText(fmt(g.t), W - 12, 30);
+  if (g.msgT > 0) { ctx.textAlign = "center"; ctx.fillStyle = "#ff6a6a"; ctx.font = "bold 22px sans-serif"; ctx.fillText(g.msg, W / 2, 90); }
+  let ns = null, nd = 1e9; // flèche vers l’éclat le plus proche s’il est hors écran
+  for (const s of g.shards) { const d = Math.hypot(s.x - p.x, s.y - p.y); if (d < nd) { nd = d; ns = s; } }
+  if (ns && (Math.abs(ns.x - p.x) > W / 2 - 10 || Math.abs(ns.y - p.y) > H / 2 - 10)) {
+    const a = Math.atan2(ns.y - p.y, ns.x - p.x), m = Math.min(W, H) * 0.4;
+    ctx.save(); ctx.translate(W / 2 + Math.cos(a) * m, H / 2 + Math.sin(a) * m); ctx.rotate(a);
+    ctx.fillStyle = "#8fe3ff"; ctx.beginPath(); ctx.moveTo(10, 0); ctx.lineTo(-6, -7); ctx.lineTo(-6, 7); ctx.fill(); ctx.restore();
+  }
+  if (stick) {
+    ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(stick.ox, stick.oy, 50, 0, 6.283); ctx.stroke();
+    ctx.beginPath(); ctx.arc(stick.ox + stick.x * 50, stick.oy + stick.y * 50, 18, 0, 6.283); ctx.stroke();
+  }
+}
+const fmt = t => String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(Math.floor(t % 60)).padStart(2, "0");
+
+// ====== Écrans (menu, niveau, fin) ======
+function show(html) { ov.innerHTML = '<div class="card">' + html + "</div>"; ov.hidden = false; }
+function showMenu() {
+  show("<h1>Veillée</h1><p>Joueur : <b>" + esc(meName) + "</b>" + (stats.parties ? " – " + stats.parties + " parties, record " + fmt(stats.meilleurTemps) + ", niveau " + stats.meilleurNiveau : "") + "</p><p>Survis à la nuit. Ton personnage tire tout seul : toi, tu t’occupes de bouger.</p>" +
+    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>. Ramasse ceux qui apparaissent sur la carte.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button> <button id='who' class='alt'>Changer de joueur</button>");
+  document.getElementById("go").onclick = startGame;
+  document.getElementById("who").onclick = showProfiles;
+  document.getElementById("town").onclick = showTown;
+}
+function startGame() {
+  newGame(); g.state = "play"; ov.hidden = true;
+  // Bonus permanents de la ville
+  g.w.dmg *= 1 + 0.1 * town.forge;
+  g.p.max += 10 * town.auberge; g.p.hp = g.p.max;
+  g.p.speed *= 1 + 0.05 * town.ecuries;
+  g.p.mag += 20 * town.biblio;
+}
+
+// ====== La ville : on y dépense les éclats de lune ======
+const BUILDINGS = [
+  { k: "forge", n: "Forge", d: "+10 % de dégâts par niveau", max: 8 },
+  { k: "auberge", n: "Auberge", d: "+10 PV de départ par niveau", max: 8 },
+  { k: "ecuries", n: "Écuries", d: "+5 % de vitesse par niveau", max: 8 },
+  { k: "biblio", n: "Bibliothèque", d: "Les gemmes viennent de plus loin", max: 6 }
+];
+const SKYLINE = '<svg viewBox="0 0 300 70" width="100%" aria-hidden="true" style="border-radius:8px;margin-bottom:10px"><rect width="300" height="70" fill="#1b1726"/><circle cx="250" cy="20" r="11" fill="#e8e4f5"/>' +
+  '<path d="M20 70V40l20-14 20 14v30z" fill="#3a3350"/><path d="M75 70V30h26v40z" fill="#4b4366"/><path d="M75 30l13-14 13 14z" fill="#8e2a3a"/>' +
+  '<path d="M125 70V45l18-12 18 12v25z" fill="#3a3350"/><path d="M180 70V36h40v34z" fill="#4b4366"/><rect x="92" y="46" width="5" height="7" fill="#ffe27a"/><rect x="138" y="50" width="6" height="8" fill="#ffe27a"/><rect x="195" y="44" width="6" height="8" fill="#ffe27a"/></svg>';
+function showTown() {
+  show("<h2>La ville</h2>" + SKYLINE + "<p>Éclats de lune : <b>" + bank + "</b>. Chaque amélioration est permanente.</p>");
+  const card = ov.firstChild;
+  for (const b of BUILDINGS) {
+    const lv = town[b.k], full = lv >= b.max, cost = Math.round(5 * 1.5 ** lv);
+    const btn = document.createElement("button");
+    btn.className = "opt"; btn.disabled = full || bank < cost;
+    btn.innerHTML = "<b>" + b.n + " (niv. " + lv + "/" + b.max + ")</b><span>" + b.d + " – " + (full ? "niveau max" : cost + " éclats") + "</span>";
+    btn.onclick = () => { bank -= cost; town[b.k]++; saveBank(); saveTown(); showTown(); };
+    card.appendChild(btn);
+  }
+  const back = document.createElement("button");
+  back.textContent = "Retour"; back.onclick = () => (g.state === "over" ? showOver() : showMenu());
+  card.appendChild(back);
+}
+function showLevelUp() {
+  g.state = "levelup"; g.pending--;
+  const picks = UPGRADES.slice().sort(() => Math.random() - 0.5).slice(0, 3);
+  show("<h2>Niveau " + g.p.lvl + "</h2><p>Choisis une amélioration.</p>");
+  const card = ov.firstChild;
+  for (const u of picks) {
+    const b = document.createElement("button");
+    b.className = "opt"; b.innerHTML = "<b>" + u.n + "</b><span>" + u.d + "</span>";
+    b.onclick = () => { u.f(g); ov.hidden = true; g.state = "play"; };
+    card.appendChild(b);
+  }
+}
+function showOver() {
+  show("<h2>Tu es tombé</h2><p>Tu as tenu " + fmt(g.t) + ", niveau " + g.p.lvl + ", avec " + g.kills + " victimes.</p><p>Éclats de lune ramassés : <b>" + g.run + "</b> (réserve : " + bank + ")</p><button id='again'>Rejouer</button> <button id='town' class='alt'>La ville</button>");
+  document.getElementById("again").onclick = startGame;
+  document.getElementById("town").onclick = showTown;
+}
+
+// ====== Boucle principale ======
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (g.state === "play") update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+newGame();
+(async function start() {
+  show("<h1>Veillée</h1><p>Chargement…</p>");
+  let last0 = NaN; try { last0 = parseInt(localStorage.getItem("veillee_dernier")); } catch (e) {}
+  if (last0 >= 0) { try { await loadProfile(last0); showMenu(); return; } catch (e) {} }
+  showProfiles();
+})();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
