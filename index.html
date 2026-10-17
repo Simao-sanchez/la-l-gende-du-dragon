@@ -92,10 +92,12 @@ function saveLoot() { // enregistre dans la base les objets trouvés pendant la 
 // ====== Améliorations proposées à chaque niveau ======
 const UPGRADES = [
   { n: "Lame affûtée", d: "+25 % de dégâts", f: g => g.w.dmg *= 1.25 },
-  { n: "Mains rapides", d: "Tire 20 % plus vite", f: g => g.w.rate *= 0.8 },
-  { n: "Tir multiple", d: "+1 projectile", f: g => g.w.count++ },
+  { n: "Mains rapides", d: "Attaque 20 % plus vite", f: g => g.w.rate *= 0.8 },
+  { n: "Tir multiple", d: "+1 projectile", only: ["proj"], f: g => g.w.count++ },
+  { n: "Double sort", d: "+1 zone magique à chaque lancer", only: ["zone"], f: g => g.w.count++ },
+  { n: "Grande allonge", d: "+25 % de portée du coup d’épée", only: ["slash"], f: g => g.w.radius *= 1.25 },
   { n: "Orbe gardienne", d: "+1 orbe qui tourne autour de toi", f: g => g.w.orbs++ },
-  { n: "Traversée", d: "Les tirs percent +1 ennemi", f: g => g.w.pierce++ },
+  { n: "Traversée", d: "Les tirs percent +1 ennemi", only: ["proj"], f: g => g.w.pierce++ },
   { n: "Bottes légères", d: "+15 % de vitesse", f: g => g.p.speed *= 1.15 },
   { n: "Aimant", d: "Ramasse les gemmes de plus loin", f: g => g.p.mag += 50 },
   { n: "Festin", d: "+20 PV max et soin de 40 PV", f: g => { g.p.max += 20; g.p.hp = Math.min(g.p.max, g.p.hp + 40); } }
@@ -110,17 +112,17 @@ async function sb(path, method, body, prefer) {
   if (prefer || method === "PATCH") h.Prefer = prefer || "return=minimal";
   const r = await fetch(SB_URL + path, { method: method || "GET", keepalive: !!method && method !== "GET", headers: h, body: body ? JSON.stringify(body) : undefined });
   if (!r.ok) throw new Error(await r.text());
-  return method === "PATCH" ? null : r.json();
+  return method === "PATCH" || method === "DELETE" ? null : r.json();
 }
 const esc = t => String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
 // Données du joueur actif (chargées depuis la base)
-let me = -1, meName = "", bank = 0, stats = {}, players = [], inv = []; // inv = équipements du joueur
+let me = -1, meName = "", bank = 0, stats = {}, players = [], inv = [], frag = 0, cityRow = null; // inv = équipements, frag = fragments de boss, cityRow = état du camp
 let town = { forge: 0, auberge: 0, ecuries: 0, biblio: 0 };
 let saveTimer = null;
 function saveRemote(now) { // enregistre éclats, ville et statistiques
   clearTimeout(saveTimer);
-  const go = () => sb("/players?id=eq." + me, "PATCH", { shards: bank, town, stats, updated_at: new Date().toISOString() }).catch(() => {});
+  const go = () => { stats.frag = frag; return sb("/players?id=eq." + me, "PATCH", { shards: bank, town, stats, updated_at: new Date().toISOString() }).catch(() => {}); };
   if (now) return go();
   saveTimer = setTimeout(go, 1500);
 }
@@ -132,8 +134,11 @@ async function loadProfile(i) {
   const rows = await sb("/players?id=eq." + i + "&select=*");
   if (!rows[0]) throw new Error("profil introuvable");
   me = i; meName = rows[0].name; bank = rows[0].shards; stats = rows[0].stats || {};
-  town = Object.assign({ forge: 0, auberge: 0, ecuries: 0, biblio: 0 }, rows[0].town);
+  frag = stats.frag || 0;
+  town = Object.assign({ maison: 0 }, rows[0].town);
+  if (!town.maison && town.auberge) town.maison = town.auberge; // l’ancien niveau « auberge » devient celui de la maison
   inv = await sb("/items?player_id=eq." + i + "&select=*&order=id");
+  try { await loadCity(); } catch (e) {}
   try { localStorage.setItem("veillee_dernier", i); } catch (e) {} // le navigateur retient le dernier joueur
 }
 function endRun() { // met à jour les statistiques en fin de partie
@@ -165,8 +170,8 @@ let g;
 function newGame() {
   g = { state: "menu", t: 0, kills: 0, spawn: 0, cd: 0, ang: 0, pending: 0,
     p: { x: 0, y: 0, r: 12, hp: 100, max: 100, speed: 150, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
-    w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0 },
-    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], run: 0, nextBoss: 90, nextShard: 4, msg: "", msgT: 0 };
+    w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0, mode: "proj", radius: 70 },
+    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], zones: [], fx: [], run: 0, runF: 0, nextBoss: 90, nextShard: 4, msg: "", msgT: 0 };
 }
 
 function spawnEnemy() {
@@ -212,20 +217,31 @@ function update(dt) {
     g.nextShard = 6; const a = Math.random() * 6.283, d = 220 + Math.random() * 280;
     g.shards.push({ x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d, ph: Math.random() * 6 });
   }
-  for (const s of g.shards) if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + 14) { s.got = true; g.run++; bank++; saveBank(); }
+  for (const s of g.shards) if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + 14) { s.got = true; if (s.f) { g.runF++; frag++; g.msg = "Fragment de boss !"; g.msgC = "#ff7a7a"; g.msgT = 2; } else { g.run++; bank++; } saveBank(); }
   g.shards = g.shards.filter(s => !s.got && Math.hypot(s.x - p.x, s.y - p.y) < 1000);
   for (const l of g.loot) if (Math.hypot(l.x - p.x, l.y - p.y) < p.r + 16) {
     l.got = true; g.found.push(l.it); g.msg = "Trouvé : " + l.it.name; g.msgC = RAR_C[l.it.r]; g.msgT = 2.5;
   }
   g.loot = g.loot.filter(l => !l.got && Math.hypot(l.x - p.x, l.y - p.y) < 1400);
 
-  // Tir automatique sur l’ennemi le plus proche
+  // Attaque automatique : tir (aventurier, archer), coup d’épée (guerrier) ou zone magique (mage)
   g.cd -= dt;
   if (g.cd <= 0) {
-    let best = null, bd = 420 * 420;
-    for (const e of g.enemies) { const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2; if (d2 < bd) { bd = d2; best = e; } }
-    if (best) {
-      const base = Math.atan2(best.y - p.y, best.x - p.x);
+    const d2 = e => (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+    const near = g.enemies.filter(e => d2(e) < 420 * 420).sort((a, b) => d2(a) - d2(b));
+    if (w.mode === "slash") {
+      if (near.length && Math.sqrt(d2(near[0])) < w.radius + near[0].r + 10) {
+        for (const e of g.enemies) if (Math.sqrt(d2(e)) < w.radius + e.r) e.hp -= w.dmg;
+        g.fx.push({ follow: true, r: w.radius, t: 0.18, c: "#ffe9b0" });
+        g.cd = w.rate;
+      }
+    } else if (w.mode === "zone") {
+      if (near.length) {
+        for (let i = 0; i < w.count && i < near.length; i++) g.zones.push({ x: near[i].x, y: near[i].y, t: 0.4, r: w.radius, d: w.dmg * 1.6 });
+        g.cd = w.rate;
+      }
+    } else if (near.length) {
+      const base = Math.atan2(near[0].y - p.y, near[0].x - p.x);
       for (let i = 0; i < w.count; i++) {
         const a = base + (i - (w.count - 1) / 2) * 0.18;
         g.shots.push({ x: p.x, y: p.y, vx: Math.cos(a) * 380, vy: Math.sin(a) * 380, life: 1.2, pl: w.pierce, hit: [] });
@@ -233,6 +249,17 @@ function update(dt) {
       g.cd = w.rate;
     }
   }
+  for (const z of g.zones) { // les zones magiques explosent après un court délai
+    z.t -= dt;
+    if (z.t <= 0) {
+      z.done = true;
+      for (const e of g.enemies) if (Math.hypot(e.x - z.x, e.y - z.y) < z.r + e.r) e.hp -= z.d;
+      g.fx.push({ x: z.x, y: z.y, r: z.r, t: 0.25, c: "#b88af0" });
+    }
+  }
+  g.zones = g.zones.filter(z => !z.done);
+  for (const f of g.fx) f.t -= dt;
+  g.fx = g.fx.filter(f => f.t > 0);
 
   // Projectiles
   for (const s of g.shots) {
@@ -260,9 +287,10 @@ function update(dt) {
   }
   // Mort des ennemis : ils laissent une gemme d’expérience
   for (const e of g.enemies) if (e.hp <= 0) {
-    g.gems.push({ x: e.x, y: e.y, v: e.boss ? 15 : e.r > 15 ? 3 : 1 }); g.kills++;
+    if (g.xpOn) g.gems.push({ x: e.x, y: e.y, v: e.boss ? 15 : e.r > 15 ? 3 : 1 }); g.kills++;
     if (e.boss) for (let i = 0; i < 3; i++) g.shards.push({ x: e.x + (i - 1) * 24, y: e.y, ph: i });
-    if (e.boss || Math.random() < 0.012) g.loot.push({ x: e.x, y: e.y + 10, it: rollItem(!!e.boss), ph: Math.random() * 6 });
+    if (e.boss) g.shards.push({ x: e.x, y: e.y + 28, ph: 1, f: true }); // fragment de boss
+    if (g.lootOn && (e.boss || Math.random() < 0.012)) g.loot.push({ x: e.x, y: e.y + 10, it: rollItem(!!e.boss), ph: Math.random() * 6 });
   }
   g.enemies = g.enemies.filter(e => e.hp > 0);
 
@@ -368,8 +396,8 @@ function draw() {
   decor(cx, cy);
   for (const s of g.shards) { // éclats de lune
     const b = Math.sin(g.t * 3 + s.ph) * 3;
-    ctx.fillStyle = "rgba(120,200,255,.25)"; ctx.beginPath(); ctx.arc(s.x, s.y + b, 16, 0, 6.283); ctx.fill();
-    ctx.fillStyle = "#8fe3ff"; ctx.beginPath(); ctx.moveTo(s.x, s.y - 10 + b); ctx.lineTo(s.x + 7, s.y + b); ctx.lineTo(s.x, s.y + 10 + b); ctx.lineTo(s.x - 7, s.y + b); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = s.f ? "rgba(255,90,90,.28)" : "rgba(120,200,255,.25)"; ctx.beginPath(); ctx.arc(s.x, s.y + b, 16, 0, 6.283); ctx.fill();
+    ctx.fillStyle = s.f ? "#ff6a6a" : "#8fe3ff"; ctx.beginPath(); ctx.moveTo(s.x, s.y - 10 + b); ctx.lineTo(s.x + 7, s.y + b); ctx.lineTo(s.x, s.y + 10 + b); ctx.lineTo(s.x - 7, s.y + b); ctx.closePath(); ctx.fill();
   }
   for (const m of g.gems) { ctx.fillStyle = "#5fe0a0"; ctx.fillRect(m.x - 3, m.y - 3, 6, 6); }
   for (const l of g.loot) { // coffres d’équipement, de la couleur de leur rareté
@@ -379,6 +407,16 @@ function draw() {
     ctx.fillStyle = c; ctx.fillRect(l.x - 8, l.y - 5 + b, 16, 4); ctx.fillRect(l.x - 2, l.y - 2 + b, 4, 5);
   }
   for (const e of g.enemies) sprite(e);
+  for (const z of g.zones) { // zone magique : le disque se remplit avant l’explosion
+    const k = 1 - z.t / 0.4;
+    ctx.fillStyle = "rgba(184,138,240,.25)"; ctx.beginPath(); ctx.arc(z.x, z.y, z.r * k, 0, 6.283); ctx.fill();
+    ctx.strokeStyle = "rgba(184,138,240,.9)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, 6.283); ctx.stroke();
+  }
+  for (const f of g.fx) { // coup d’épée et explosions
+    const x = f.follow ? p.x : f.x, y = f.follow ? p.y : f.y, k = f.t / (f.follow ? 0.18 : 0.25);
+    ctx.globalAlpha = Math.max(0, k); ctx.strokeStyle = f.c; ctx.lineWidth = 6 * k + 2;
+    ctx.beginPath(); ctx.arc(x, y, f.r * (1.1 - 0.2 * k), 0, 6.283); ctx.stroke(); ctx.globalAlpha = 1;
+  }
   ctx.fillStyle = "#ffe27a";
   for (const s of g.shots) { ctx.beginPath(); ctx.arc(s.x, s.y, 4, 0, 6.283); ctx.fill(); }
   for (let i = 0; i < g.w.orbs; i++) {
@@ -390,13 +428,14 @@ function draw() {
   ctx.globalAlpha = 1; ctx.restore();
 
   // Interface : barre d’XP, PV, temps
-  ctx.fillStyle = "#3a2f55"; ctx.fillRect(0, 0, W, 8);
-  ctx.fillStyle = "#5fe0a0"; ctx.fillRect(0, 0, W * p.xp / p.next, 8);
+  if (g.xpOn) { ctx.fillStyle = "#3a2f55"; ctx.fillRect(0, 0, W, 8);
+  ctx.fillStyle = "#5fe0a0"; ctx.fillRect(0, 0, W * p.xp / p.next, 8); }
   ctx.fillStyle = "#3a2f55"; ctx.fillRect(12, 18, 140, 12);
   ctx.fillStyle = "#e05a5a"; ctx.fillRect(12, 18, 140 * Math.max(0, p.hp) / p.max, 12);
   ctx.fillStyle = "#f0eaf7"; ctx.font = "14px sans-serif"; ctx.textAlign = "left";
-  ctx.fillText("Niv. " + p.lvl + "   Victimes : " + g.kills, 12, 48);
+  ctx.fillText((g.xpOn ? "Niv. " + p.lvl + "   " : "") + "Victimes : " + g.kills, 12, 48);
   ctx.fillStyle = "#8fe3ff"; ctx.fillText("Éclats : " + g.run + " (réserve " + bank + ")", 12, 66); ctx.fillStyle = "#f0eaf7";
+  if (frag) { ctx.fillStyle = "#ff7a7a"; ctx.fillText("Fragments de boss : " + frag, 12, 84); ctx.fillStyle = "#f0eaf7"; }
   ctx.textAlign = "right"; ctx.fillText(fmt(g.t), W - 12, 30);
   if (g.msgT > 0) { ctx.textAlign = "center"; ctx.fillStyle = g.msgC || "#ff6a6a"; ctx.font = "bold 22px sans-serif"; ctx.fillText(g.msg, W / 2, 90); }
   let ns = null, nd = 1e9; // flèche vers l’éclat le plus proche s’il est hors écran
@@ -418,47 +457,119 @@ const fmt = t => String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(Math
 function show(html) { ov.innerHTML = '<div class="card">' + html + "</div>"; ov.hidden = false; }
 function showMenu() {
   show("<h1>Veillée</h1><p>Joueur : <b>" + esc(meName) + "</b>" + (stats.parties ? " – " + stats.parties + " parties, record " + fmt(stats.meilleurTemps) + ", niveau " + stats.meilleurNiveau : "") + "</p><p>Survis à la nuit. Ton personnage tire tout seul : toi, tu t’occupes de bouger.</p>" +
-    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>. Ramasse ceux qui apparaissent sur la carte.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button> <button id='eq' class='alt'>Équipement</button> <button id='who' class='alt'>Changer de joueur</button>");
-  document.getElementById("go").onclick = startGame;
+    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>. Ramasse ceux qui apparaissent sur la carte.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : "") + " <button id='who' class='alt'>Changer de joueur</button>");
+  document.getElementById("go").onclick = play;
   document.getElementById("who").onclick = showProfiles;
-  document.getElementById("eq").onclick = showEquip;
+  if (has("armurerie")) document.getElementById("eq").onclick = showEquip;
   document.getElementById("town").onclick = showTown;
 }
-function startGame() {
-  newGame(); g.state = "play"; ov.hidden = true;
-  // Bonus permanents de la ville
-  g.w.dmg *= 1 + 0.1 * town.forge;
-  g.p.max += 10 * town.auberge; g.p.hp = g.p.max;
-  g.p.speed *= 1 + 0.05 * town.ecuries;
-  g.p.mag += 20 * town.biblio;
-  g.xpMul = 1 + 0.05 * (town.autel || 0);
-  const eq = stats.equip || {}; // bonus des équipements portés
-  for (const it of inv) if (eq[it.kind] === it.id) {
-    const v = it.data.val, t = it.data.st;
-    if (t === "dmg") g.w.dmg *= 1 + v / 100;
-    else if (t === "hp") { g.p.max += v; g.p.hp = g.p.max; }
-    else if (t === "speed") g.p.speed *= 1 + v / 100;
-    else if (t === "mag") g.p.mag += v;
-  }
+// ====== Classes, talents et recyclage ======
+const CLASSES = {
+  guerrier: { n: "Guerrier", cost: 0, d: "+50 % de PV. Coup d’épée circulaire plus puissant, mais à courte portée." },
+  archer: { n: "Archer", cost: 50, d: "+20 % de vitesse et un second projectile dès le départ." },
+  mage: { n: "Mage", cost: 500, d: "Des zones magiques tombent sur les ennemis et l’expérience monte 30 % plus vite, mais −10 % de PV." }
+};
+const TALENT_COST = [10, 25, 50]; // éclats de lune pour les niveaux 1, 2 et 3 d’un talent
+const TALENTS = {
+  guerrier: [
+    { id: "peau", n: "Peau de pierre", d: "+10 PV par niveau", f: (g, l) => { g.p.max += 10 * l; } },
+    { id: "lame", n: "Lame lourde", d: "+8 % de dégâts par niveau", f: (g, l) => { g.w.dmg *= 1 + 0.08 * l; } },
+    { id: "allonge", n: "Bras long", d: "+8 % de portée par niveau", f: (g, l) => { g.w.radius *= 1 + 0.08 * l; } }
+  ],
+  archer: [
+    { id: "pieds", n: "Pieds ailés", d: "+5 % de vitesse par niveau", f: (g, l) => { g.p.speed *= 1 + 0.05 * l; } },
+    { id: "carquois", n: "Carquois renforcé", d: "+8 % de dégâts par niveau", f: (g, l) => { g.w.dmg *= 1 + 0.08 * l; } },
+    { id: "oeil", n: "Œil de lynx", d: "−5 % de délai entre les tirs par niveau", f: (g, l) => { g.w.rate *= 1 - 0.05 * l; } }
+  ],
+  mage: [
+    { id: "erudit", n: "Érudit", d: "+5 % d’expérience par niveau", f: (g, l) => { g.xpMul *= 1 + 0.05 * l; } },
+    { id: "astres", n: "Pluie d’astres", d: "+8 % de dégâts par niveau", f: (g, l) => { g.w.dmg *= 1 + 0.08 * l; } },
+    { id: "ampleur", n: "Zone élargie", d: "+8 % de rayon par niveau", f: (g, l) => { g.w.radius *= 1 + 0.08 * l; } }
+  ]
+};
+const RECYCLE = [1, 3, 8, 20]; // éclats rendus pour un équipement détruit : commun, rare, épique, légendaire
+
+function applyClass(c) {
+  const p = g.p, w = g.w;
+  if (c === "guerrier") { p.max = Math.round(p.max * 1.5); w.mode = "slash"; w.dmg *= 2.2; w.rate = 0.9; w.radius = 75; }
+  else if (c === "archer") { p.speed *= 1.2; w.count += 1; }
+  else if (c === "mage") { p.max = Math.round(p.max * 0.9); w.mode = "zone"; w.rate = 1.1; w.radius = 55; g.xpMul *= 1.3; }
 }
 
-// ====== La ville : on y dépense les éclats de lune ======
-// Les bâtiments apparaissent dans cet ordre : le premier existe dès le départ, les autres sont financés à 100 éclats chacun.
-// x et y = position sur la carte.
+// ====== État du camp : quels bâtiments sont débloqués ? ======
+async function loadCity() { const r = await sb("/city?id=eq.1&select=*"); cityRow = r[0] || null; }
+function cityState() { // les dons s’accumulent : chaque bâtiment consomme son coût dans l’ordre
+  let f = cityRow ? cityRow.funded : 0, nb = 0;
+  for (const B of BUILDINGS.slice(1)) { if (f >= B.cost) { f -= B.cost; nb++; } else break; }
+  const total = BUILDINGS.slice(1).reduce((a, B) => a + B.cost, 0);
+  return { nb, have: f, next: BUILDINGS[nb + 1] || null, left: Math.max(0, total - (cityRow ? cityRow.funded : 0)) };
+}
+const has = k => BUILDINGS.findIndex(b => b.k === k) <= cityState().nb;
+
+// ====== Lancer une partie ======
+function play() { if (has("taverne")) showClasses(); else startGame("base"); }
+async function startGame(cls) {
+  try { await loadCity(); } catch (e) {} // état du camp à jour
+  newGame(); g.state = "play"; ov.hidden = true;
+  g.xpOn = has("auberge"); g.lootOn = has("armurerie"); g.xpMul = 1;
+  g.p.max += 10 * (town.maison || 0); // maison
+  if (CLASSES[cls]) {
+    applyClass(cls);
+    if (town.up_taverne) for (const T of TALENTS[cls]) T.f(g, ((stats.talents || {})[cls] || {})[T.id] || 0);
+  }
+  if (g.lootOn) { // bonus des équipements portés
+    const eq = stats.equip || {};
+    for (const it of inv) if (eq[it.kind] === it.id) {
+      const v = it.data.val, t = it.data.st;
+      if (t === "dmg") g.w.dmg *= 1 + v / 100;
+      else if (t === "hp") g.p.max += v;
+      else if (t === "speed") g.p.speed *= 1 + v / 100;
+      else if (t === "mag") g.p.mag += v;
+    }
+  }
+  g.p.hp = g.p.max;
+}
+
+// ====== Écrans de niveau et de fin de partie ======
+function showLevelUp() {
+  g.state = "levelup"; g.pending--;
+  const picks = UPGRADES.filter(u => !u.only || u.only.includes(g.w.mode)).sort(() => Math.random() - 0.5).slice(0, 3);
+  show("<h2>Niveau " + g.p.lvl + "</h2><p>Choisis une amélioration.</p>");
+  const card = ov.firstChild;
+  for (const u of picks) {
+    const b = document.createElement("button");
+    b.className = "opt"; b.innerHTML = "<b>" + u.n + "</b><span>" + u.d + "</span>";
+    b.onclick = () => { u.f(g); ov.hidden = true; g.state = "play"; };
+    card.appendChild(b);
+  }
+}
+function showOver() {
+  show("<h2>Tu es tombé</h2><p>Tu as tenu " + fmt(g.t) + (g.xpOn ? ", niveau " + g.p.lvl : "") + ", avec " + g.kills + " victimes.</p><p>Éclats de lune ramassés : <b>" + g.run + "</b> (réserve : " + bank + ")</p>" +
+    (g.runF ? "<p>Fragments de boss : <b>" + g.runF + "</b> (total : " + frag + ")</p>" : "") +
+    (g.lootOn ? "<p>Équipements trouvés : " + (g.found.length ? g.found.map(it => RAR[it.r].n.toLowerCase() + " (" + it.name + ")").join(", ") : "aucun") + ".</p>" : "") +
+    "<button id='again'>Rejouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : ""));
+  document.getElementById("again").onclick = play;
+  document.getElementById("town").onclick = showTown;
+  if (has("armurerie")) document.getElementById("eq").onclick = showEquip;
+}
+
+// ====== La ville : une carte où les bâtiments apparaissent grâce aux dons de tous ======
+// Ordre de déblocage = ordre de la liste. cost = éclats de lune à réunir ensemble (la maison est offerte).
+// x et y = position sur la carte. up = amélioration payée en fragments de boss.
 const BUILDINGS = [
-  { k: "auberge", n: "Maison", d: "Ton chez-toi : +10 PV de départ par niveau.", max: 8, x: 95, y: 118 },
-  { k: "forge", n: "Forge", d: "+10 % de dégâts par niveau.", max: 8, x: 305, y: 112 },
-  { k: "ecuries", n: "Écuries", d: "+5 % de vitesse par niveau.", max: 8, x: 72, y: 208 },
-  { k: "biblio", n: "Bibliothèque", d: "Les gemmes viennent de plus loin.", max: 6, x: 205, y: 230 },
-  { k: "autel", n: "Autel de lune", d: "+5 % d’expérience gagnée par niveau.", max: 5, x: 332, y: 208 }
+  { k: "maison", n: "Maison", cost: 0, d: "Ton chez-toi : +10 PV de départ par niveau.", x: 95, y: 118 },
+  { k: "auberge", n: "Auberge", cost: 10, d: "Débloque l’expérience : tu gagnes des niveaux et des améliorations pendant les parties.", x: 305, y: 112 },
+  { k: "armurerie", n: "Armurerie", cost: 100, d: "Débloque les équipements : ils tombent pendant les parties et peuvent être portés.", x: 72, y: 208,
+    up: { key: "up_armurerie", frag: 1, d: "détruire un équipement dont tu ne veux plus, contre des éclats de lune (1 pour un commun, jusqu’à 20 pour un légendaire)." } },
+  { k: "taverne", n: "Taverne", cost: 100, d: "Débloque les classes : tu choisis ton personnage avant chaque partie.", x: 332, y: 208,
+    up: { key: "up_taverne", frag: 10, d: "un arbre de talents propre à chaque classe." } }
 ];
 // Dessins des bâtiments (le point 0,0 est au pied du bâtiment)
 const ART = {
-  auberge: '<rect x="-24" y="-30" width="48" height="32" fill="#6b4f3a"/><path d="M-30 -30L0 -54L30 -30z" fill="#8e2a3a"/><rect x="-5" y="-16" width="10" height="18" fill="#3a2518"/><rect x="-20" y="-25" width="9" height="9" fill="#ffe27a"/><rect x="11" y="-25" width="9" height="9" fill="#ffe27a"/>',
-  forge: '<rect x="-26" y="-28" width="52" height="30" fill="#4b4366"/><rect x="-31" y="-35" width="62" height="8" fill="#3a3350"/><rect x="12" y="-54" width="9" height="20" fill="#3a3350"/><circle cx="17" cy="-60" r="5" fill="rgba(200,200,220,.35)"/><rect x="-19" y="-20" width="16" height="22" fill="#e8742a"/><rect x="6" y="-9" width="14" height="6" fill="#2a2438"/>',
-  ecuries: '<rect x="-34" y="-24" width="68" height="26" fill="#6b4f3a"/><path d="M-40 -24L-30 -40H30L40 -24z" fill="#5a3d2b"/><rect x="-26" y="-16" width="14" height="18" fill="#2a1a10"/><rect x="12" y="-16" width="14" height="18" fill="#2a1a10"/><rect x="-3" y="-24" width="6" height="26" fill="#5a3d2b"/>',
-  biblio: '<rect x="-22" y="-44" width="44" height="46" fill="#3a3350"/><path d="M-27 -44L0 -64L27 -44z" fill="#4a6aa0"/><rect x="-15" y="-36" width="9" height="14" rx="4" fill="#ffe27a"/><rect x="6" y="-36" width="9" height="14" rx="4" fill="#ffe27a"/><rect x="-5" y="-14" width="10" height="16" rx="4" fill="#241c34"/>',
-  autel: '<ellipse cx="0" cy="-2" rx="30" ry="9" fill="#4b4366"/><ellipse cx="0" cy="-5" rx="22" ry="6" fill="#6b5aa0"/><circle cx="0" cy="-28" r="24" fill="rgba(143,227,255,.16)"/><path d="M0 -48L9 -26L0 -9L-9 -26z" fill="#8fe3ff"/>'
+  maison: '<rect x="-24" y="-30" width="48" height="32" fill="#6b4f3a"/><path d="M-30 -30L0 -54L30 -30z" fill="#8e2a3a"/><rect x="-5" y="-16" width="10" height="18" fill="#3a2518"/><rect x="-20" y="-25" width="9" height="9" fill="#ffe27a"/><rect x="11" y="-25" width="9" height="9" fill="#ffe27a"/>',
+  auberge: '<rect x="-30" y="-34" width="60" height="36" fill="#7a5a40"/><path d="M-36 -34L0 -58L36 -34z" fill="#5a3d2b"/><rect x="-6" y="-18" width="12" height="20" fill="#3a2518"/><rect x="-24" y="-26" width="10" height="10" fill="#ffe27a"/><rect x="14" y="-26" width="10" height="10" fill="#ffe27a"/><rect x="33" y="-42" width="2" height="24" fill="#3a2518"/><rect x="26" y="-40" width="14" height="9" fill="#e8c26a"/>',
+  armurerie: '<rect x="-26" y="-28" width="52" height="30" fill="#4b4366"/><rect x="-31" y="-35" width="62" height="8" fill="#3a3350"/><rect x="12" y="-54" width="9" height="20" fill="#3a3350"/><circle cx="17" cy="-60" r="5" fill="rgba(200,200,220,.35)"/><rect x="-19" y="-20" width="16" height="22" fill="#e8742a"/><circle cx="13" cy="-14" r="8" fill="#b8b8c8"/><path d="M13 -20v12M7 -14h12" stroke="#5a5a70" stroke-width="2"/>',
+  taverne: '<rect x="-34" y="-26" width="68" height="28" fill="#6b4f3a"/><path d="M-40 -26L-28 -46H28L40 -26z" fill="#8a3a2a"/><rect x="-6" y="-16" width="12" height="18" fill="#2a1a10"/><rect x="-27" y="-20" width="12" height="9" fill="#ffe27a"/><rect x="15" y="-20" width="12" height="9" fill="#ffe27a"/><circle cx="-40" cy="-6" r="7" fill="#5a3d2b"/><circle cx="40" cy="-6" r="7" fill="#5a3d2b"/><rect x="-5" y="-55" width="10" height="9" fill="#e8c26a"/>'
 };
 const SITE = '<rect x="-26" y="-22" width="52" height="24" fill="rgba(232,194,106,.12)" stroke="#e8c26a" stroke-width="2" stroke-dasharray="6 4"/><path d="M-26 2L-18 -26M26 2L18 -26" stroke="#8a6a3a" stroke-width="3"/><rect x="-20" y="-36" width="40" height="12" fill="#6b4f3a"/><text x="0" y="-27" text-anchor="middle" font-size="8" fill="#fff" font-family="sans-serif">chantier</text>';
 
@@ -470,7 +581,7 @@ function townSVG(nb, showSite) {
   for (const [x, y] of trees) s += '<rect x="' + (x - 2) + '" y="' + (y + 18) + '" width="4" height="8" fill="#3a2a1c"/><path d="M' + x + ' ' + (y - 6) + 'l-12 26h24z" fill="#1b3a2a"/>';
   s += '<g transform="translate(200 142)"><circle cy="-4" r="26" fill="rgba(255,154,58,.12)"/><ellipse cy="4" rx="10" ry="4" fill="#2a1a10"/><path d="M0 -14q-8 10 0 18q8 -8 0 -18z" fill="#ff9a3a"/><path d="M0 -8q-4 6 0 10q4 -4 0 -10z" fill="#ffe27a"/></g>';
   for (const { B, i } of vis.sort((a, b) => a.B.y - b.B.y)) {
-    const built = i <= nb, lv = town[B.k] || 0;
+    const built = i <= nb, lv = B.k === "maison" ? town.maison || 0 : 0;
     s += '<g transform="translate(' + B.x + ' ' + B.y + ')"' + (built ? ' data-k="' + B.k + '" tabindex="0" role="button" aria-label="' + B.n + '" style="cursor:pointer"' : '') + '>' +
       '<ellipse cx="0" cy="3" rx="34" ry="6" fill="rgba(0,0,0,.28)"/>' +
       (built && townSel === B.k ? '<ellipse cx="0" cy="3" rx="40" ry="10" fill="none" stroke="#b88af0" stroke-width="2.5"/>' : '') +
@@ -479,25 +590,23 @@ function townSVG(nb, showSite) {
   return s + '</svg>';
 }
 
-let townData = { city: null, names: {} }, townSel = null;
+let townData = { names: {} }, townSel = null;
 const leaveTown = () => (g.state === "over" ? showOver() : showMenu());
-const mecenes = (city, names) => {
-  const t = Object.entries(city.contrib || {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id, v]) => esc(names[id] || "?") + " (" + v + ")").join(", ");
+const mecenes = names => {
+  const t = Object.entries((cityRow && cityRow.contrib) || {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id, v]) => esc(names[id] || "?") + " (" + v + ")").join(", ");
   return t ? " Mécènes : " + t + "." : "";
 };
 async function showTown() { // charge l’état partagé du camp, puis dessine la carte
   show("<h2>La ville</h2><p>Chargement…</p>");
-  const d = { city: null, names: {} };
-  try { d.city = (await sb("/city?id=eq.1&select=*"))[0] || null; } catch (e) {}
-  try { for (const pl of await sb("/players?select=id,name")) d.names[pl.id] = pl.name; } catch (e) {}
-  townData = d; renderTown();
+  try { await loadCity(); } catch (e) {}
+  const names = {};
+  try { for (const pl of await sb("/players?select=id,name")) names[pl.id] = pl.name; } catch (e) {}
+  townData = { names }; renderTown();
 }
 function renderTown() {
-  const city = townData.city, names = townData.names;
-  const maxB = Math.min(city && city.max_buildings != null ? city.max_buildings : BUILDINGS.length - 1, BUILDINGS.length - 1);
-  const nb = city ? Math.min(Math.floor(city.funded / city.cost), maxB) : 0; // nombre de bâtiments débloqués en plus de la maison
+  const names = townData.names, cs = cityState(), nb = cs.nb;
   if (!townSel) townSel = BUILDINGS[0].k;
-  show("<h2>La ville</h2>" + townSVG(nb, !!city && nb < maxB) + "<p>Éclats de lune : <b>" + bank + "</b>. Touche un bâtiment pour l’améliorer.</p>");
+  show("<h2>La ville</h2>" + townSVG(nb, !!cityRow && !!cs.next) + "<p>Éclats de lune : <b>" + bank + "</b> · Fragments de boss : <b>" + frag + "</b>. Touche un bâtiment pour voir sa fiche.</p>");
   const card = ov.firstChild; card.classList.add("wide");
   card.querySelectorAll("[data-k]").forEach(el => {
     const pick = () => { townSel = el.dataset.k; renderTown(); };
@@ -508,30 +617,40 @@ function renderTown() {
 
   const idx = BUILDINGS.findIndex(x => x.k === townSel);
   if (idx >= 0 && idx <= nb) { // fiche du bâtiment choisi
-    const B = BUILDINGS[idx], lv = town[B.k] || 0, full = lv >= B.max, cost = Math.round(5 * 1.5 ** lv);
+    const B = BUILDINGS[idx];
     const panel = document.createElement("div"); panel.style.cssText = boxStyle;
-    panel.innerHTML = "<b>" + B.n + " (niv. " + lv + "/" + B.max + ")</b><p style='margin:6px 0 10px'>" + B.d + "</p>";
-    const up = document.createElement("button");
-    up.textContent = full ? "Niveau maximum" : "Améliorer – " + cost + " éclats";
-    up.disabled = full || bank < cost;
-    up.onclick = () => { bank -= cost; town[B.k] = lv + 1; saveRemote(true); renderTown(); };
-    panel.appendChild(up);
-    if (idx === 0) {
-      const chest = document.createElement("button");
-      chest.className = "alt"; chest.style.marginLeft = "6px"; chest.textContent = "Coffre d’équipement";
-      chest.onclick = () => showEquip(showTown);
-      panel.appendChild(chest);
+    panel.innerHTML = "<b>" + B.n + "</b><p style='margin:6px 0 10px'>" + B.d + "</p>";
+    const add = (label, on, disabled, alt) => {
+      const b = document.createElement("button");
+      b.textContent = label; if (alt) b.className = "alt"; b.disabled = !!disabled; b.style.cssText = "margin:0 6px 6px 0"; b.onclick = on;
+      panel.appendChild(b);
+    };
+    if (B.k === "maison") {
+      const lv = town.maison || 0, full = lv >= 8, cost = Math.round(5 * 1.5 ** lv);
+      add(full ? "Niveau maximum" : "Améliorer (niv. " + lv + "/8) – " + cost + " éclats", () => { bank -= cost; town.maison = lv + 1; saveRemote(true); renderTown(); }, full || bank < cost);
+    }
+    if (B.k === "armurerie") add("Ouvrir l’équipement", () => showEquip(showTown), false, true);
+    if (B.k === "taverne" && town.up_taverne) add("Arbres de talents", () => showTalents(), false, true);
+    if (B.up) {
+      if (town[B.up.key]) panel.insertAdjacentHTML("beforeend", "<p style='margin:6px 0 0'>✓ Améliorée : " + B.up.d + "</p>");
+      else {
+        add("Améliorer – " + B.up.frag + " fragment" + (B.up.frag > 1 ? "s" : "") + " de boss", () => { frag -= B.up.frag; town[B.up.key] = 1; saveRemote(true); renderTown(); }, frag < B.up.frag);
+        panel.insertAdjacentHTML("beforeend", "<p style='margin:6px 0 0;font-size:.9rem'>Amélioration : " + B.up.d + " Les fragments de boss sont lâchés par les boss.</p>");
+      }
     }
     card.appendChild(panel);
   }
 
-  if (city && nb < maxB) { // chantier commun : le prochain bâtiment
-    const next = BUILDINGS[nb + 1], have = city.funded - nb * city.cost, need = city.cost - have, left = maxB * city.cost - city.funded;
-    const box = document.createElement("div"); box.style.cssText = boxStyle;
-    box.innerHTML = "<b>Chantier commun : " + next.n + "</b><p style='margin:6px 0'>" + have + " / " + city.cost + " éclats. Chacun peut donner autant qu’il veut." + mecenes(city, names) + "</p>" +
-      "<div style='height:8px;background:var(--line);border-radius:4px;margin-bottom:10px'><div style='height:8px;width:" + Math.round(100 * have / city.cost) + "%;background:var(--accent);border-radius:4px'></div></div>";
+  const box = document.createElement("div"); box.style.cssText = boxStyle;
+  if (!cityRow) { // table city absente ou injoignable
+    box.innerHTML = "<b>Chantier commun indisponible</b><p style='margin:6px 0 0'>La base de données ne répond pas pour le camp.</p>";
+    card.appendChild(box);
+  } else if (cs.next) { // chantier commun : le prochain bâtiment
+    const next = cs.next, need = next.cost - cs.have;
+    box.innerHTML = "<b>Chantier commun : " + next.n + "</b><p style='margin:6px 0'>" + cs.have + " / " + next.cost + " éclats. Chacun peut donner autant qu’il veut." + mecenes(names) + "</p>" +
+      "<div style='height:8px;background:var(--line);border-radius:4px;margin-bottom:10px'><div style='height:8px;width:" + Math.round(100 * cs.have / next.cost) + "%;background:var(--accent);border-radius:4px'></div></div>";
     for (const n of [...[5, 25].filter(v => v < need), need]) {
-      const amount = Math.min(n, bank, left);
+      const amount = Math.min(n, bank, cs.left);
       const b = document.createElement("button");
       b.className = "alt"; b.style.cssText = "margin:0 6px 6px 0";
       b.textContent = n === need ? "Compléter (" + Math.min(need, bank) + ")" : "Donner " + n;
@@ -547,9 +666,8 @@ function renderTown() {
       box.appendChild(b);
     }
     card.appendChild(box);
-  } else if (city) {
-    const box = document.createElement("div"); box.style.cssText = boxStyle;
-    box.innerHTML = "<b>Le camp est complet !</b><p style='margin:6px 0 0'>Merci à tous." + mecenes(city, names) + "</p>";
+  } else {
+    box.innerHTML = "<b>Le camp est complet !</b><p style='margin:6px 0 0'>Merci à tous." + mecenes(names) + "</p>";
     card.appendChild(box);
   }
   const back = document.createElement("button");
@@ -557,7 +675,68 @@ function renderTown() {
   card.appendChild(back);
 }
 
-// ====== Équipement : choisir ce qu’on porte (un objet par emplacement) ======
+// ====== Choix de la classe avant une partie ======
+function showClasses() {
+  show("<h2>Choisis ta classe</h2><p>Ta classe change ta façon de combattre. Éclats de lune : <b>" + bank + "</b>.</p>");
+  const card = ov.firstChild;
+  for (const [k, C] of Object.entries(CLASSES)) {
+    const open = C.cost === 0 || town["cl_" + k];
+    const b = document.createElement("button");
+    b.className = "opt"; b.innerHTML = "<b></b><span></span>";
+    b.firstChild.textContent = C.n + (open ? "" : " (verrouillé)");
+    b.lastChild.textContent = C.d + (open ? "" : " Débloquer : " + C.cost + " éclats.");
+    if (open) {
+      if ((stats.classe || "guerrier") === k) b.style.borderLeft = "6px solid var(--accent)";
+      b.onclick = () => { stats.classe = k; saveRemote(true); startGame(k); };
+    } else {
+      b.disabled = bank < C.cost;
+      b.onclick = () => { bank -= C.cost; town["cl_" + k] = 1; saveRemote(true); showClasses(); };
+    }
+    card.appendChild(b);
+  }
+  const back = document.createElement("button");
+  back.textContent = "Retour"; back.onclick = leaveTown;
+  card.appendChild(back);
+}
+
+// ====== Arbres de talents (taverne améliorée) ======
+let talentCls = "guerrier";
+function showTalents() {
+  const open = Object.keys(TALENTS).filter(k => CLASSES[k].cost === 0 || town["cl_" + k]);
+  if (!open.includes(talentCls)) talentCls = open[0];
+  show("<h2>Arbres de talents</h2><p>Éclats de lune : <b>" + bank + "</b>. Chaque classe a ses propres talents. Débloque d’autres classes en lançant une partie.</p>");
+  const card = ov.firstChild;
+  const tabs = document.createElement("div"); tabs.style.marginBottom = "10px";
+  for (const k of open) {
+    const t = document.createElement("button");
+    t.className = k === talentCls ? "" : "alt"; t.style.cssText = "margin:0 6px 6px 0"; t.textContent = CLASSES[k].n;
+    t.onclick = () => { talentCls = k; showTalents(); };
+    tabs.appendChild(t);
+  }
+  card.appendChild(tabs);
+  const mine = ((stats.talents = stats.talents || {})[talentCls] = stats.talents[talentCls] || {});
+  for (const T of TALENTS[talentCls]) {
+    const lv = mine[T.id] || 0, full = lv >= TALENT_COST.length, cost = TALENT_COST[lv];
+    const b = document.createElement("button");
+    b.className = "opt"; b.innerHTML = "<b></b><span></span>"; b.disabled = full || bank < cost;
+    b.firstChild.textContent = T.n + " (niv. " + lv + "/" + TALENT_COST.length + ")";
+    b.lastChild.textContent = T.d + " – " + (full ? "niveau max" : cost + " éclats");
+    b.onclick = () => { bank -= cost; mine[T.id] = lv + 1; saveRemote(true); showTalents(); };
+    card.appendChild(b);
+  }
+  const back = document.createElement("button");
+  back.textContent = "Retour"; back.onclick = showTown;
+  card.appendChild(back);
+}
+
+// ====== Équipement : choisir ce qu’on porte, et détruire ce dont on ne veut plus ======
+let delPending = null;
+async function destroyItem(it, from) {
+  try { await sb("/items?id=eq." + it.id, "DELETE"); } catch (e) { return showError(() => showEquip(from)); }
+  inv = inv.filter(x => x.id !== it.id);
+  if (stats.equip && stats.equip[it.kind] === it.id) delete stats.equip[it.kind];
+  bank += RECYCLE[it.data.r]; delPending = null; saveRemote(true); showEquip(from);
+}
 async function showEquip(from) { // from : écran où revenir (la ville) ; sinon menu ou fin de partie
   await lootP;
   const eq = stats.equip || (stats.equip = {});
@@ -568,13 +747,21 @@ async function showEquip(from) { // from : écran où revenir (la ville) ; sinon
   if (!inv.length) card.insertAdjacentHTML("beforeend", "<p>Aucun équipement pour l’instant : ils tombent des ennemis et des boss.</p>");
   for (const it of inv.slice().sort((a, b) => b.data.r - a.data.r || a.kind.localeCompare(b.kind))) {
     const on = eq[it.kind] === it.id, R = RAR[it.data.r], S = SLOTS[it.kind];
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:6px;margin-bottom:8px";
     const b = document.createElement("button");
-    b.className = "opt"; b.style.borderLeft = "6px solid " + R.c;
+    b.className = "opt"; b.style.cssText = "margin:0;flex:1;width:auto;border-left:6px solid " + R.c;
     b.innerHTML = "<b></b><span></span>";
     b.firstChild.textContent = (on ? "✓ " : "") + it.data.name;
     b.lastChild.textContent = R.n + " · " + S.l + " · +" + it.data.val + S.u + (on ? " (porté : cliquer pour retirer)" : "");
     b.onclick = () => { if (on) delete eq[it.kind]; else eq[it.kind] = it.id; saveRemote(true); showEquip(from); };
-    card.appendChild(b);
+    row.appendChild(b);
+    if (town.up_armurerie) { // recyclage débloqué par l’amélioration de l’armurerie
+      const d = document.createElement("button");
+      d.className = "alt"; d.textContent = delPending === it.id ? "Confirmer (+" + RECYCLE[it.data.r] + ")" : "Détruire (+" + RECYCLE[it.data.r] + ")";
+      d.onclick = () => { if (delPending === it.id) destroyItem(it, from); else { delPending = it.id; showEquip(from); } };
+      row.appendChild(d);
+    }
+    card.appendChild(row);
   }
   const back = document.createElement("button");
   back.textContent = "Retour"; back.onclick = typeof from === "function" ? from : leaveTown;
