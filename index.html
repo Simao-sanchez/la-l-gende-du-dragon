@@ -91,15 +91,18 @@ const SLOTS = { // fx = pouvoirs possibles pour cet emplacement
   amulette: { l: "Amulette", base: 25, u: " px de portée de ramassage", names: ["Médaillon", "Talisman", "Croc"], st: "mag", fx: ["orb"] }
 };
 const EPITHET = ["de fortune", "d’argent", "de la nuit", "du roi vampire", "de chasseur"];
+function makeItem(r, forceFx) { // équipement de rareté r (position dans RAR) ; forceFx = pouvoir spécial obligatoire
+  const slot = Object.keys(SLOTS)[Math.floor(Math.random() * 4)], S = SLOTS[slot], R = RAR[r];
+  const val = Math.round(S.base * R.m * (0.9 + Math.random() * 0.2));
+  const it = { kind: slot, r, st: S.st, val, name: S.names[Math.floor(Math.random() * S.names.length)] + " " + EPITHET[r] };
+  if (forceFx || Math.random() < R.fxp) { it.fx = S.fx[Math.floor(Math.random() * S.fx.length)]; it.fl = Math.max(1, R.ord); } // pouvoir spécial
+  return it;
+}
 function rollItem(boss) { // la rareté dépend du niveau (LEVELS.loot) : monstres d’un côté, boss de l’autre
   const table = boss ? g.lv.loot.boss : g.lv.loot.mob;
   let x = Math.random() * table.reduce((a, [, w]) => a + w, 0), r = table[0][0];
   for (const [id, w] of table) { r = id; if (x < w) break; x -= w; }
-  const slot = Object.keys(SLOTS)[Math.floor(Math.random() * 4)], S = SLOTS[slot], R = RAR[r];
-  const val = Math.round(S.base * R.m * (0.9 + Math.random() * 0.2));
-  const it = { kind: slot, r, st: S.st, val, name: S.names[Math.floor(Math.random() * S.names.length)] + " " + EPITHET[r] };
-  if (Math.random() < R.fxp) { it.fx = S.fx[Math.floor(Math.random() * S.fx.length)]; it.fl = Math.max(1, R.ord); } // pouvoir spécial
-  return it;
+  return makeItem(r);
 }
 let lootP = Promise.resolve();
 function saveLoot() { // enregistre dans la base les objets trouvés pendant la partie
@@ -201,17 +204,76 @@ function newGame() {
 
 // Un niveau = décor, quantité de ressources et de monstres, force des monstres (hp, dmg), part de monstres d’élite (elite).
 const LEVELS = {
-  foret: { n: "Forêt", bg: "#14211a", grid: "#1c2d23", nodes: 16, packs: 7, enemies: 110, bosses: [[650, 850], [950, 1200]], hp: 1, dmg: 1, elite: 0, nodeBonus: 0, loot: { mob: [[0, 1]], boss: [[4, 1]] }, drop: 0.012,
+  foret: { n: "Forêt", bg: "#14211a", grid: "#1c2d23", nodes: 16, packs: 7, enemies: 110, bosses: [[650, 850], [950, 1200]], hp: 1, dmg: 1, elite: 0, nodeBonus: 0, charge: true, loot: { mob: [[0, 1]], boss: [[4, 1]] }, drop: 0.012,
     d: "Des arbres épais cachent les monstres et les gisements. Peu de ressources, mais des monstres plus faibles. Vaincre un boss de la forêt ouvre la ville. Seuls des équipements communs y tombent, et les boss en lâchent des peu communs." },
   ville: { n: "Ville en ruines", lock: "lvl_ville", hint: "Vaincs un boss de la forêt pour débloquer ce niveau.", bg: "#1a1c26", grid: "#242738", nodes: 55, packs: 11, enemies: 230,
     bosses: [[600, 800], [850, 1000], [1050, 1220]], hp: 1.5, dmg: 1.4, elite: 0.12, nodeBonus: 1, loot: { mob: [[0, 70], [4, 30]], boss: [[4, 1]] }, drop: 0.014,
     d: "Des rues en ruines, beaucoup de ressources, mais des monstres bien plus nombreux et plus forts. Ils peuvent lâcher des équipements communs et peu communs." }
 };
 const HALF = 1300; // rayon de la carte ; la sortie est au centre, là où l’on commence
+// ====== Obstacles : murs des ruines (ville) et troncs d’arbres (forêt) ======
+// Ces calculs doivent rester identiques à ceux du dessin (decor et drawTrees) : même grille, mêmes dimensions.
+function ruinRects(i, j) { // murs de la ruine de l’îlot (i, j), en rectangles [x, y, largeur, hauteur] ; la porte est un trou dans le mur du bas
+  if (Math.abs(Math.sin(i * 91.7 + j * 173.1) * 12345.6) % 1 > 0.8) return [];
+  const x0 = i * 360 + 56, y0 = j * 360 + 56, bw = 248, t = 3.5; // 56 = demi-rue + 24 ; 248 = 360 - 64 - 48
+  return [[x0, y0 - t, bw, 2 * t], [x0 - t, y0, 2 * t, bw], [x0 + bw - t, y0, 2 * t, bw], [x0, y0 + bw - t, bw * 0.32, 2 * t], [x0 + bw * 0.68, y0 + bw - t, bw * 0.32, 2 * t]];
+}
+function treeCell(i, j) { // arbre de la cellule (i, j) de la forêt, ou null
+  const cs = 80, h = Math.abs(Math.sin(i * 53.7 + j * 211.3) * 31415.9) % 1;
+  if (h > 0.6) return null;
+  const x = i * cs + ((h * 9973) % 1) * cs, y = j * cs + ((h * 7919) % 1) * cs, d = Math.hypot(x, y);
+  if (d < 120 || d > HALF + 40) return null; // la sortie reste dégagée
+  return { x, y, r: 26 + ((h * 4409) % 1) * 14 }; // r = rayon de la cime ; le tronc est un petit cercle sous la cime
+}
+function blocked(x, y, r) { // le cercle (x, y, r) touche-t-il un obstacle ?
+  if (g.lvKey === "ville") {
+    const st = 360;
+    for (let i = Math.floor((x - r - 8) / st); i <= Math.floor((x + r + 8) / st); i++)
+      for (let j = Math.floor((y - r - 8) / st); j <= Math.floor((y + r + 8) / st); j++)
+        for (const [rx, ry, rw, rh] of ruinRects(i, j)) {
+          const cx = Math.max(rx, Math.min(x, rx + rw)), cy = Math.max(ry, Math.min(y, ry + rh));
+          if ((x - cx) ** 2 + (y - cy) ** 2 < r * r) return true;
+        }
+  } else if (g.lvKey === "foret") {
+    const cs = 80;
+    for (let i = Math.floor((x - r - 10) / cs); i <= Math.floor((x + r + 10) / cs); i++)
+      for (let j = Math.floor((y - r - 20) / cs); j <= Math.floor((y + r + 20) / cs); j++) {
+        const t = treeCell(i, j);
+        if (t && (x - t.x) ** 2 + (y - (t.y + 9)) ** 2 < (r + 7) ** 2) return true;
+      }
+  }
+  return false;
+}
+function lineClear(x1, y1, x2, y2) { // aucun obstacle entre les deux points ? (sert à ne pas tirer à travers un mur)
+  const n = Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 10);
+  for (let k = 1; k < n; k++) { const t = k / n; if (blocked(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, 2)) return false; }
+  return true;
+}
+function moveBy(o, dx, dy, r) { // déplace o en glissant le long des obstacles (s’il est déjà coincé dedans, il peut en sortir)
+  if (blocked(o.x, o.y, r)) { o.x += dx; o.y += dy; return; }
+  if (!blocked(o.x + dx, o.y, r)) o.x += dx;
+  if (!blocked(o.x, o.y + dy, r)) o.y += dy;
+}
+function bossCharge(e, dx, dy, d, dt) { // boss qui charge : poursuite, visée (1 s, couloir rouge), charge en ligne droite, repos
+  const R = e.r * 0.8;
+  e.stT -= dt;
+  if (e.st === "chase") {
+    moveBy(e, dx / d * e.sp * dt, dy / d * e.sp * dt, R);
+    if (e.stT <= 0) { if (d > 140 && d < 560) { e.st = "wind"; e.stT = 1; } else e.stT = 1.5; }
+  } else if (e.st === "wind") {
+    if (e.stT > 0.35) { e.cx = dx / d; e.cy = dy / d; } // il suit le joueur, puis la direction est verrouillée : c’est le moment d’esquiver
+    if (e.stT <= 0) { e.st = "charge"; e.stT = 0.6; }
+  } else if (e.st === "charge") {
+    const step = 420 * dt, x0 = e.x, y0 = e.y;
+    moveBy(e, e.cx * step, e.cy * step, R);
+    if (Math.hypot(e.x - x0, e.y - y0) < step * 0.5 || e.stT <= 0) { e.st = "rest"; e.stT = 0.8; } // un obstacle l’arrête : il est étourdi
+  } else if (e.stT <= 0) { e.st = "chase"; e.stT = 4 + Math.random() * 4; }
+}
 function spawnAt(x, y, aggro, boss) { // plus on s’éloigne de la sortie, plus les monstres sont nombreux et solides
   const L = g.lv, R = HALF - 20, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
+  for (let k = 0; k < 10 && blocked(x, y, 16); k++) { x += (Math.random() - 0.5) * 80; y += (Math.random() - 0.5) * 80; } // pas dans un mur
   const d = Math.hypot(x, y), r = Math.random() - L.elite, sc = (1 + d / 900 + g.t / 240) * L.hp;
-  if (boss) { const hp = 450 * sc, e = { x, y, r: 34, hp, max: hp, sp: 52, oc: 0, k: 3, boss: true, ph: 0, aggro: !!aggro }; g.enemies.push(e); return e; }
+  if (boss) { const hp = 450 * sc, e = { x, y, r: 34, hp, max: hp, sp: 52, oc: 0, k: 3, boss: true, ph: 0, aggro: !!aggro, st: "chase", stT: 4 + Math.random() * 4, cx: 0, cy: 0 }; g.enemies.push(e); return e; }
   const type = d > 900 ? (r < 0.3 ? 2 : r < 0.6 ? 1 : 0) : d > 550 ? (r < 0.12 ? 2 : r < 0.4 ? 1 : 0) : (r < 0.2 ? 1 : 0);
   const T = [{ r: 10, hp: 15, sp: 60, c: "#e05a5a" }, { r: 8, hp: 9, sp: 115, c: "#e8a838" }, { r: 18, hp: 70, sp: 42, c: "#a35ae0" }][type];
   const e = { x, y, r: T.r, hp: T.hp * sc, sp: T.sp * (0.9 + Math.random() * 0.2), c: T.c, oc: 0, k: type, ph: Math.random() * 6, aggro: !!aggro };
@@ -219,11 +281,11 @@ function spawnAt(x, y, aggro, boss) { // plus on s’éloigne de la sortie, plus
 }
 function genWorld() { // remplit la carte selon le niveau : gisements, caisses de munitions, monstres et boss gardiens
   const L = g.lv, rnd = (a, b) => a + Math.random() * (b - a);
-  const pos = (dmin, dmax) => { const a = rnd(0, 6.283), d = Math.sqrt(rnd(dmin * dmin, dmax * dmax)); return { x: Math.cos(a) * d, y: Math.sin(a) * d }; };
+  const pos = (dmin, dmax, r = 18) => { for (let k = 0; ; k++) { const a = rnd(0, 6.283), d = Math.sqrt(rnd(dmin * dmin, dmax * dmax)), q = { x: Math.cos(a) * d, y: Math.sin(a) * d }; if (k > 15 || !blocked(q.x, q.y, r)) return q; } }; // jamais dans un obstacle
   for (let i = 0; i < L.nodes; i++) { const q = pos(180, 1250); g.nodes.push({ x: q.x, y: q.y, v: 1 + Math.floor(Math.hypot(q.x, q.y) / 350) + (Math.random() < 0.3 ? 1 : 0) + L.nodeBonus, prog: 0, ph: Math.random() * 6 }); }
   for (let i = 0; i < L.packs; i++) { const q = pos(150, 1250); g.packs.push({ x: q.x, y: q.y, v: 15 }); }
   for (let i = 0; i < L.enemies; i++) { const q = pos(300, 1250); spawnAt(q.x, q.y, false); }
-  for (const [a, b] of L.bosses) { const q = pos(a, b); spawnAt(q.x, q.y, false, true); }
+  for (const [a, b] of L.bosses) { const q = pos(a, b, 30); spawnAt(q.x, q.y, false, true); }
 }
 
 // ====== Mise à jour (appelée à chaque image) ======
@@ -273,9 +335,9 @@ function update(dt) {
   }
   if (g.dashT > 0) { // ruée rapide, invincible pendant toute sa durée
     g.dashT -= dt; p.inv = Math.max(p.inv, 0.02);
-    p.x += g.dashV.x * p.speed * 4.2 * dt; p.y += g.dashV.y * p.speed * 4.2 * dt;
+    moveBy(p, g.dashV.x * p.speed * 4.2 * dt, g.dashV.y * p.speed * 4.2 * dt, 10);
     g.fx.push({ x: p.x, y: p.y, r: 10, t: 0.2, c: "#d9c6ff" });
-  } else { p.x += mx * p.speed * dt; p.y += my * p.speed * dt; }
+  } else moveBy(p, mx * p.speed * dt, my * p.speed * dt, 10);
   if (g.regen) p.hp = Math.min(p.max, p.hp + g.regen * dt);
   p.mov = !!(mx || my); if (mx) p.face = mx > 0 ? 1 : -1;
   const rr = Math.hypot(p.x, p.y); if (rr > HALF) { p.x *= HALF / rr; p.y *= HALF / rr; } // bord de la carte
@@ -341,13 +403,16 @@ function update(dt) {
         for (let i = 0; i < w.count && i < near.length; i++) g.zones.push({ x: near[i].x, y: near[i].y, t: 0.4, r: w.radius, d: w.dmg * 1.6 });
         g.cd = w.rate; g.ammo--;
       }
-    } else if (near.length) {
-      const base = Math.atan2(near[0].y - p.y, near[0].x - p.x);
-      for (let i = 0; i < w.count; i++) {
-        const a = base + (i - (w.count - 1) / 2) * 0.18;
-        g.shots.push({ x: p.x, y: p.y, vx: Math.cos(a) * 380, vy: Math.sin(a) * 380, life: 1.2, pl: w.pierce, hit: [] });
+    } else {
+      const vis = near.filter(e => lineClear(p.x, p.y, e.x, e.y)); // on ne tire pas à travers un mur
+      if (vis.length) {
+        const base = Math.atan2(vis[0].y - p.y, vis[0].x - p.x);
+        for (let i = 0; i < w.count; i++) {
+          const a = base + (i - (w.count - 1) / 2) * 0.18;
+          g.shots.push({ x: p.x, y: p.y, vx: Math.cos(a) * 380, vy: Math.sin(a) * 380, life: 1.2, pl: w.pierce, hit: [] });
+        }
+        g.cd = w.rate; g.ammo--;
       }
-      g.cd = w.rate; g.ammo--;
     }
   }
   for (const z of g.zones) { // les zones magiques explosent après un court délai
@@ -371,6 +436,7 @@ function update(dt) {
   // Projectiles
   for (const s of g.shots) {
     s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+    if (blocked(s.x, s.y, 2)) { s.life = 0; continue; } // le tir s’arrête contre un mur ou un tronc
     for (const e of g.enemies) {
       if (s.pl < 0) break;
       if (s.hit.includes(e)) continue;
@@ -390,9 +456,12 @@ function update(dt) {
     e.oc -= dt;
     const dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy) || 1;
     if (!e.aggro && d < (e.boss ? 380 : 260)) e.aggro = true;
-    else if (e.aggro && d > (e.boss ? 900 : 650)) e.aggro = false;
-    if (e.aggro) { e.x += dx / d * e.sp * dt; e.y += dy / d * e.sp * dt; }
-    if (d < e.r + p.r && p.inv <= 0) { p.hp -= ((e.boss ? 18 : 8) + g.t / 60) * g.lv.dmg; p.inv = 0.5; g.exitT = 0; g.graveT = 0; }
+    else if (e.aggro && d > (e.boss ? 900 : 650)) { e.aggro = false; if (e.boss) { e.st = "chase"; e.stT = 4; } }
+    if (e.aggro) {
+      if (e.boss && g.lv.charge) bossCharge(e, dx, dy, d, dt); // les boss de ce niveau chargent de temps en temps
+      else moveBy(e, dx / d * e.sp * dt, dy / d * e.sp * dt, e.r * 0.8); // les murs et les troncs bloquent les monstres
+    }
+    if (d < e.r + p.r && p.inv <= 0) { p.hp -= ((e.boss ? 18 : 8) + g.t / 60) * g.lv.dmg * (e.st === "charge" ? 1.8 : 1); p.inv = 0.5; g.exitT = 0; g.graveT = 0; }
   }
   // Mort des ennemis : butin, munitions et équipements
   for (const e of g.enemies) if (e.hp <= 0) {
@@ -493,7 +562,7 @@ function decor(cx, cy) { // décor du niveau, placé par un calcul fixe : identi
       if (Math.abs(Math.sin(i * 91.7 + j * 173.1) * 12345.6) % 1 > 0.8) continue; // certains îlots restent vides
       const x0 = i * st + rw / 2 + 24, y0 = j * st + rw / 2 + 24, bw = st - rw - 48;
       ctx.fillStyle = "#1f2230"; ctx.fillRect(x0, y0, bw, bw);
-      ctx.strokeStyle = "#4a506c"; ctx.lineWidth = 7; ctx.beginPath();
+      ctx.strokeStyle = "#7a84a8"; ctx.lineWidth = 7; ctx.beginPath();
       ctx.moveTo(x0, y0 + bw); ctx.lineTo(x0, y0); ctx.lineTo(x0 + bw, y0); ctx.lineTo(x0 + bw, y0 + bw);
       ctx.moveTo(x0, y0 + bw); ctx.lineTo(x0 + bw * 0.32, y0 + bw); ctx.moveTo(x0 + bw * 0.68, y0 + bw); ctx.lineTo(x0 + bw, y0 + bw);
       ctx.stroke();
@@ -529,10 +598,8 @@ function drawTrees(cx, cy) { // forêt : les cimes cachent ce qui est dessous (m
   const cs = 80, p = g.p;
   for (let i = Math.floor(cx / cs) - 1; i <= (cx + W) / cs + 1; i++)
     for (let j = Math.floor(cy / cs) - 1; j <= (cy + H) / cs + 1; j++) {
-      const h = Math.abs(Math.sin(i * 53.7 + j * 211.3) * 31415.9) % 1;
-      if (h > 0.6) continue;
-      const x = i * cs + ((h * 9973) % 1) * cs, y = j * cs + ((h * 7919) % 1) * cs, r = 26 + ((h * 4409) % 1) * 14, dx = Math.hypot(x, y);
-      if (dx < 120 || dx > HALF + 40) continue; // la sortie reste dégagée
+      const t = treeCell(i, j); if (!t) continue;
+      const { x, y, r } = t;
       ctx.globalAlpha = Math.max(0.3, Math.min(0.96, (Math.hypot(x - p.x, y - p.y) - 25) / 70)); // la cime devient transparente près du héros
       ctx.fillStyle = "#3a2a1c"; ctx.fillRect(x - 4, y - 2, 8, 20);
       ctx.fillStyle = "#143a24"; ctx.beginPath(); ctx.arc(x, y - 10, r, 0, 6.283); ctx.fill();
@@ -614,6 +681,12 @@ function draw() {
     ctx.fillStyle = "#9fd8ff"; ctx.beginPath(); ctx.arc(p.x + Math.cos(a) * 60, p.y + Math.sin(a) * 60, 9, 0, 6.283); ctx.fill();
   }
   drawTrees(cx, cy);
+  for (const e of g.enemies) if (e.st === "wind" || e.st === "charge") { // le couloir rouge montre où le boss va charger
+    const locked = e.st === "charge" || e.stT < 0.35;
+    ctx.lineCap = "butt"; ctx.strokeStyle = "rgba(255,60,60," + (locked ? 0.28 : 0.14) + ")"; ctx.lineWidth = 56;
+    ctx.beginPath(); ctx.moveTo(e.x, e.y); ctx.lineTo(e.x + e.cx * 280, e.y + e.cy * 280); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,90,90," + (locked ? 0.9 : 0.5) + ")"; ctx.lineWidth = 2; ctx.stroke();
+  }
   ctx.globalAlpha = p.inv > 0 && Math.floor(g.t * 20) % 2 ? 0.4 : 1;
   drawHero(p);
   ctx.globalAlpha = 1; ctx.restore();
@@ -657,10 +730,9 @@ const fmt = t => String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(Math
 function show(html) { ov.innerHTML = '<div class="card">' + html + "</div>"; ov.hidden = false; }
 function showMenu() {
   show("<h1>Veillée</h1><p>Joueur : <b>" + esc(meName) + "</b>" + (stats.parties ? " – " + stats.parties + " parties, " + (stats.evacuations || 0) + " évacuations" : "") + "</p><p>Explore la carte, récolte des éclats de lune, puis reviens à la sortie sans mourir. Si tu tombes, tu perds ton butin et ton équipement porté. Ton personnage attaque tout seul, mais tes munitions sont limitées.</p>" +
-    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : "") + " <button id='who' class='alt'>Changer de joueur</button>" + (TEST_MODE ? " <button id='test' class='alt'>Outils de test</button>" : "")); // TEST
+    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : "") + " <button id='who' class='alt'>Changer de joueur</button>");
   document.getElementById("go").onclick = play;
   document.getElementById("who").onclick = showProfiles;
-  if (TEST_MODE) document.getElementById("test").onclick = showTestTools; // TEST
   if (has("armurerie")) document.getElementById("eq").onclick = showEquip;
   document.getElementById("town").onclick = showTown;
 }
@@ -893,6 +965,9 @@ function renderTown() {
   const back = document.createElement("button");
   back.textContent = "Retour"; back.onclick = leaveTown;
   card.appendChild(back);
+  const dbg = document.createElement("button"); // DEBUG temporaire
+  dbg.textContent = "Debug"; dbg.className = "alt"; dbg.style.marginLeft = "6px"; dbg.onclick = showDebug;
+  card.appendChild(dbg);
 }
 
 // ====== Choix de la classe avant une partie ======
@@ -988,38 +1063,59 @@ async function showEquip(from) { // from : écran où revenir (la ville) ; sinon
   card.appendChild(back);
 }
 
-// ====== OUTILS DE TEST (à supprimer avant d’ouvrir le jeu à tout le monde) ======
-// Le bouton « Outils de test » n’apparaît que si l’adresse du jeu se termine par ?test
-const TEST_MODE = /[?&]test\b/.test(location.search);
-let resetPending = false;
-function testAddFrag() { frag += 10; saveRemote(true); showTestTools(); }
-async function testAddItem() { // équipement peu commun avec pouvoir spécial, pour tester
-  let it = rollItem(true); while (!it.fx) it = rollItem(true);
-  try { inv.push(...await sb("/items", "POST", [{ player_id: me, kind: it.kind, data: { r: it.r, st: it.st, val: it.val, name: it.name, fx: it.fx, fl: it.fl } }], "return=representation")); } catch (e) {}
-  showTestTools();
+// ====== DEBUG (temporaire) : bouton « Debug » dans la ville, à supprimer plus tard ======
+let dbgPending = "", dbgMsg = "";
+const dbgDone = () => { saveRemote(true); showDebug(); };
+async function dbgItem(r, power) { // ajoute un équipement de la rareté r (avec un pouvoir si power)
+  const it = makeItem(r, power);
+  try { inv.push(...await sb("/items", "POST", [{ player_id: me, kind: it.kind, data: { r: it.r, st: it.st, val: it.val, name: it.name, fx: it.fx, fl: it.fl } }], "return=representation")); dbgMsg = "Ajouté : " + it.name; }
+  catch (e) { dbgMsg = "Erreur : équipement non ajouté."; }
+  showDebug();
 }
-function testAddShards() { bank += 100; saveRemote(true); showTestTools(); }
-async function testReset() { // efface la sauvegarde du joueur actif (pas le camp commun)
-  if (!resetPending) { resetPending = true; return showTestTools(); }
-  resetPending = false;
-  try { await sb("/items?player_id=eq." + me, "DELETE"); } catch (e) { return showError(showTestTools); }
-  bank = 0; frag = 0; inv = []; town = { maison: 0 }; stats = {};
-  await saveRemote(true); showMenu();
+async function dbgCamp(mode) { // camp partagé : 'full' = tout construire, 'reset' = zéro + tombes vidées (fonction SQL debug_camp)
+  try { await sb("/rpc/debug_camp", "POST", { p_mode: mode }); await loadCity(); dbgMsg = mode === "full" ? "Tous les bâtiments sont construits." : "Camp et tombes remis à zéro."; }
+  catch (e) { dbgMsg = "Fonction SQL debug_camp absente : lance le SQL fourni."; }
+  showDebug();
 }
-function showTestTools() {
-  show("<h2>Outils de test</h2><p>Joueur : <b></b><br>Éclats de lune : " + bank + " · Fragments de boss : " + frag + "</p>");
-  const card = ov.firstChild;
+async function dbgReset(all) { // efface la sauvegarde du joueur ; all = aussi le camp partagé et les tombes. Deux clics pour confirmer.
+  const key = all ? "all" : "me";
+  if (dbgPending !== key) { dbgPending = key; return showDebug(); }
+  dbgPending = "";
+  try { await sb("/items?player_id=eq." + me, "DELETE"); } catch (e) { return showError(showDebug); }
+  bank = 0; frag = 0; inv = []; town = { maison: 0 }; stats = {}; await saveRemote(true);
+  dbgMsg = "Ta sauvegarde est effacée.";
+  if (all) {
+    try { await sb("/rpc/debug_camp", "POST", { p_mode: "reset" }); await loadCity(); dbgMsg += " Camp et tombes remis à zéro."; }
+    catch (e) { dbgMsg += " Camp non modifié : fonction SQL debug_camp absente."; }
+  }
+  showDebug();
+}
+function showDebug() {
+  show("<h2>Debug (temporaire)</h2><p>Joueur : <b></b><br>Éclats de lune : " + bank + " · Fragments de boss : " + frag + " · Équipements : " + inv.length + "</p><p style='font-size:.9rem'></p>");
+  const card = ov.firstChild; card.classList.add("wide");
   card.querySelector("b").textContent = meName;
+  card.querySelector("p:last-child").textContent = dbgMsg;
+  const group = t => { const h = document.createElement("p"); h.style.cssText = "margin:10px 0 6px;font-weight:bold"; h.textContent = t; card.appendChild(h); };
   const add = (label, on, alt) => {
     const b = document.createElement("button");
     b.textContent = label; b.className = alt ? "alt" : ""; b.style.cssText = "margin:0 6px 8px 0"; b.onclick = on; card.appendChild(b);
   };
-  add("+10 fragments de boss", testAddFrag);
-  add("+100 éclats de lune", testAddShards);
-  add("Débloquer la ville", () => { town.lvl_ville = 1; saveRemote(true); showTestTools(); });
-  add("+1 équipement avec pouvoir", testAddItem);
-  add(resetPending ? "Confirmer : tout effacer" : "Effacer toute ma sauvegarde", testReset, true);
-  add("Retour", () => { resetPending = false; showMenu(); }, true);
+  group("Ressources");
+  add("+100 éclats", () => { bank += 100; dbgDone(); });
+  add("+1000 éclats", () => { bank += 1000; dbgDone(); });
+  add("+10 fragments de boss", () => { frag += 10; dbgDone(); });
+  group("Équipements");
+  RAR.map((R, id) => ({ R, id })).sort((a, b) => a.R.ord - b.R.ord).forEach(({ R, id }) => add("+1 " + R.n.toLowerCase(), () => dbgItem(id)));
+  add("+1 peu commun avec pouvoir", () => dbgItem(4, true));
+  group("Progression");
+  add("Tout débloquer (ville, classes, améliorations)", () => { Object.assign(town, { lvl_ville: 1, cl_archer: 1, cl_mage: 1, up_armurerie: 1, up_taverne: 1, up_survie: 1 }); dbgMsg = "Ville, classes et améliorations débloquées."; dbgDone(); });
+  group("Camp partagé (SQL requis)");
+  add("Tout construire", () => dbgCamp("full"));
+  add("Remettre à zéro + vider les tombes", () => dbgCamp("reset"));
+  group("Remise à zéro");
+  add(dbgPending === "me" ? "Confirmer : effacer ma sauvegarde" : "Effacer ma sauvegarde", () => dbgReset(false), true);
+  add(dbgPending === "all" ? "Confirmer : TOUT remettre à zéro" : "TOUT remettre à zéro (moi + camp + tombes)", () => dbgReset(true), true);
+  add("Retour à la ville", () => { dbgPending = ""; dbgMsg = ""; showTown(); }, true);
 }
 
 // ====== Boucle principale ======
