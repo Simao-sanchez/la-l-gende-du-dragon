@@ -126,7 +126,7 @@ async function sb(path, method, body, prefer) {
   if (prefer || method === "PATCH") h.Prefer = prefer || "return=minimal";
   const r = await fetch(SB_URL + path, { method: method || "GET", keepalive: !!method && method !== "GET", headers: h, body: body ? JSON.stringify(body) : undefined });
   if (!r.ok) throw new Error(await r.text());
-  return method === "PATCH" || method === "DELETE" ? null : r.json();
+  return method === "PATCH" || method === "DELETE" || prefer === "return=minimal" ? null : r.json();
 }
 const esc = t => String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
@@ -166,12 +166,20 @@ function endRun(ok) { // ok = évacuation réussie ; sinon le joueur est mort
   } else loseGear();
   saveRemote(true);
 }
-function loseGear() { // mort : le butin de la partie est perdu, ainsi que l’équipement porté
+function loseGear() { // mort : le butin de la partie est perdu, ainsi que l’équipement porté… mais une tombe le garde
   const ids = g.lootOn ? Object.values(stats.equip || {}) : [];
   g.lost = inv.filter(it => ids.includes(it.id));
+  const lostItems = [ // équipement porté + objets trouvés pendant cette partie
+    ...g.lost.map(it => ({ kind: it.kind, data: it.data })),
+    ...g.found.map(it => ({ kind: it.kind, data: { r: it.r, st: it.st, val: it.val, name: it.name } }))
+  ];
   if (g.lost.length) {
     inv = inv.filter(it => !ids.includes(it.id)); stats.equip = {};
     sb("/items?id=in.(" + ids.join(",") + ")", "DELETE").catch(() => {});
+  }
+  if (lostItems.length) { // la tombe apparaît au même endroit dans les parties des autres joueurs
+    g.tomb = true;
+    sb("/graves", "POST", { player_id: me, name: meName, x: Math.round(g.p.x), y: Math.round(g.p.y), items: lostItems }, "return=minimal").catch(() => {});
   }
 }
 function showError(retry) {
@@ -196,7 +204,7 @@ function newGame() {
   g = { state: "menu", t: 0, kills: 0, spawn: 0, cd: 0, ang: 0, pending: 0,
     p: { x: 0, y: 0, r: 12, hp: 100, max: 100, speed: 150, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
     w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0, mode: "proj", radius: 70 },
-    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], up: {}, ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, ammo: 0, nodes: [], packs: [], ok: false, left: false, exitT: 0, lost: [], msg: "", msgT: 0 };
+    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], up: {}, ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, ammo: 0, nodes: [], packs: [], ok: false, left: false, exitT: 0, lost: [], graves: [], gravePoll: 8, graveT: 0, graveId: 0, looting: false, tomb: false, msg: "", msgT: 0 };
 }
 
 const HALF = 1300; // rayon de la carte ; la sortie est au centre, là où l’on commence
@@ -219,6 +227,24 @@ function genWorld() { // remplit la carte : gisements d’éclats, caisses de mu
 }
 
 // ====== Mise à jour (appelée à chaque image) ======
+async function refreshGraves() { // toutes les 8 s : nouvelles tombes, et tombes déjà libérées par d’autres joueurs
+  const cur = g;
+  try { const list = await sb("/graves?select=*"); if (g === cur && g.state !== "over") g.graves = list; } catch (e) {}
+}
+async function lootGrave(gr) { // la tombe disparaît pour tous ; son propriétaire récupère un ou plusieurs équipements perdus
+  g.looting = true;
+  const cur = g; let res = null;
+  try { res = await sb("/rpc/loot_grave", "POST", { p_grave: gr.id }); }
+  catch (e) { cur.msg = "Connexion perdue : réessaie."; cur.msgC = "#ff6a6a"; cur.msgT = 2.5; cur.looting = false; cur.graveT = 0; return; }
+  cur.graves = cur.graves.filter(q => q.id !== gr.id); cur.graveT = 0; cur.looting = false;
+  if (!res) { cur.msg = "Cette tombe a déjà été libérée."; cur.msgC = "#cfcfcf"; cur.msgT = 2.5; return; }
+  const names = res.given.map(it => it.data.name).join(", ");
+  if (res.owner === me) { // c’est ta propre tombe : l’équipement revient dans ton inventaire
+    try { inv = await sb("/items?player_id=eq." + me + "&select=*&order=id"); } catch (e) {}
+    cur.msg = "Tu récupères : " + names; cur.msgC = RAR_C[res.given[0].data.r || 0];
+  } else { cur.msg = "Tombe de " + res.name + " libérée : il récupère " + res.given.length + " équipement" + (res.given.length > 1 ? "s" : "") + " !"; cur.msgC = "#d9c6ff"; }
+  cur.msgT = 4;
+}
 function dealDamage(e, d) { // tous les dégâts du joueur passent ici (vol de vie du guerrier)
   e.aggro = true; const real = Math.min(d, Math.max(0, e.hp)); e.hp -= d;
   if (g.ls) g.p.hp = Math.min(g.p.max, g.p.hp + real * g.ls);
@@ -285,6 +311,14 @@ function update(dt) {
     k.got = true; g.ammo = Math.min(250, g.ammo + k.v); g.msg = "+" + k.v + " munitions"; g.msgC = "#ffe27a"; g.msgT = 1.5;
   }
   g.packs = g.packs.filter(k => !k.got);
+  g.gravePoll -= dt; // tombes : mise à jour régulière, puis pillage en restant dessus 3 secondes
+  if (g.gravePoll <= 0) { g.gravePoll = 8; refreshGraves(); }
+  const gr = g.graves.find(q => Math.hypot(q.x - p.x, q.y - p.y) < 34);
+  if (gr && !g.looting) {
+    if (g.graveId !== gr.id) { g.graveId = gr.id; g.graveT = 0; }
+    g.graveT += dt;
+    if (g.graveT >= 3) lootGrave(gr);
+  } else if (!gr) g.graveT = Math.max(0, g.graveT - dt * 2);
 
   // Attaque automatique : tir (aventurier, archer), coup d’épée (guerrier) ou zone magique (mage). Chaque attaque coûte 1 munition.
   g.cd -= dt;
@@ -358,7 +392,7 @@ function update(dt) {
     if (!e.aggro && d < (e.boss ? 380 : 260)) e.aggro = true;
     else if (e.aggro && d > (e.boss ? 900 : 650)) e.aggro = false;
     if (e.aggro) { e.x += dx / d * e.sp * dt; e.y += dy / d * e.sp * dt; }
-    if (d < e.r + p.r && p.inv <= 0) { p.hp -= (e.boss ? 18 : 8) + g.t / 60; p.inv = 0.5; g.exitT = 0; }
+    if (d < e.r + p.r && p.inv <= 0) { p.hp -= (e.boss ? 18 : 8) + g.t / 60; p.inv = 0.5; g.exitT = 0; g.graveT = 0; }
   }
   // Mort des ennemis : ils laissent une gemme d’expérience
   for (const e of g.enemies) if (e.hp <= 0) {
@@ -503,6 +537,13 @@ function draw() {
     if (n.prog > 0) { ctx.strokeStyle = "#ffe27a"; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(n.x, n.y, 26, -Math.PI / 2, -Math.PI / 2 + 6.283 * n.prog / 1.2); ctx.stroke(); }
   }
   for (const k of g.packs) { ctx.fillStyle = "#6b5a2a"; ctx.fillRect(k.x - 8, k.y - 6, 16, 12); ctx.fillStyle = "#ffe27a"; ctx.fillRect(k.x - 8, k.y - 6, 16, 3); ctx.fillRect(k.x - 2, k.y - 2, 4, 5); } // munitions
+  for (const q of g.graves) { // tombes des joueurs morts : reste dessus pour libérer leur équipement
+    ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(q.x, q.y + 6, 15, 5, 0, 0, 6.283); ctx.fill();
+    ctx.fillStyle = "#6b6585"; ctx.beginPath(); ctx.roundRect(q.x - 11, q.y - 22, 22, 28, [11, 11, 2, 2]); ctx.fill();
+    ctx.fillStyle = "#3a3350"; ctx.fillRect(q.x - 1.5, q.y - 17, 3, 14); ctx.fillRect(q.x - 6, q.y - 12, 12, 3);
+    ctx.fillStyle = "#f0eaf7"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("† " + q.name, q.x, q.y - 28);
+    if (g.graveId === q.id && g.graveT > 0) { ctx.strokeStyle = "#ffe27a"; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(q.x, q.y - 8, 28, -Math.PI / 2, -Math.PI / 2 + 6.283 * g.graveT / 3); ctx.stroke(); }
+  }
   for (const s of g.shards) { // éclats de lune
     const b = Math.sin(g.t * 3 + s.ph) * 3;
     ctx.fillStyle = s.f ? "rgba(255,90,90,.28)" : "rgba(120,200,255,.25)"; ctx.beginPath(); ctx.arc(s.x, s.y + b, 16, 0, 6.283); ctx.fill();
@@ -634,7 +675,8 @@ const has = k => BUILDINGS.findIndex(b => b.k === k) <= cityState().nb;
 function play() { if (has("taverne")) showClasses(); else startGame("base"); }
 async function startGame(cls) {
   try { await loadCity(); } catch (e) {} // état du camp à jour
-  newGame(); g.state = "play"; ov.hidden = true;
+  let graves = []; try { graves = await sb("/graves?select=*"); } catch (e) {} // tombes des joueurs morts
+  newGame(); g.state = "play"; ov.hidden = true; g.graves = graves;
   g.xpOn = has("auberge"); g.lootOn = has("armurerie"); g.xpMul = 1; g.cls = CLASSES[cls] ? cls : "base";
   g.p.max += 10 * (town.maison || 0); // maison
   if (CLASSES[cls]) {
@@ -678,6 +720,7 @@ function showOver() {
     (g.runF ? "<br>Fragments de boss : <b>" + g.runF + "</b>" + (ok ? " (total : " + frag + ")" : " perdus") : "") + "</p>" +
     (g.lootOn ? "<p>Équipements trouvés : " + (g.found.length ? names + (ok ? "" : " (perdus)") : "aucun") + ".</p>" : "") +
     (!ok && g.lost.length ? "<p>Équipement perdu : " + g.lost.map(it => it.data.name).join(", ") + ".</p>" : "") +
+    (!ok && g.tomb ? "<p>Ta tombe est apparue là où tu es tombé. Si un joueur reste dessus quelques secondes, tu récupères un de tes équipements perdus.</p>" : "") +
     "<button id='again'>Repartir</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : ""));
   document.getElementById("again").onclick = play;
   document.getElementById("town").onclick = showTown;
@@ -693,14 +736,17 @@ const BUILDINGS = [
   { k: "armurerie", n: "Armurerie", cost: 100, d: "Débloque les équipements : ils tombent pendant les parties et peuvent être portés.", x: 72, y: 208,
     up: { key: "up_armurerie", frag: 1, d: "détruire un équipement dont tu ne veux plus, contre des éclats de lune (1 pour un commun, jusqu’à 20 pour un légendaire)." } },
   { k: "taverne", n: "Taverne", cost: 100, d: "Débloque les classes : tu choisis ton personnage avant chaque partie.", x: 332, y: 208,
-    up: { key: "up_taverne", frag: 10, d: "un arbre de talents propre à chaque classe." } }
+    up: { key: "up_taverne", frag: 10, d: "un arbre de talents propre à chaque classe." } },
+  { k: "survie", n: "Refuge", cost: 100, d: "Quand tu meurs, ta tombe apparaît dans la partie des autres joueurs : s’ils restent dessus quelques secondes, tu récupères un de tes équipements perdus.", x: 205, y: 228,
+    up: { key: "up_survie", frag: 5, d: "chaque fois que ta tombe est libérée, 50 % de chances de récupérer un 2e équipement et 25 % d’en récupérer un 3e." } }
 ];
 // Dessins des bâtiments (le point 0,0 est au pied du bâtiment)
 const ART = {
   maison: '<rect x="-24" y="-30" width="48" height="32" fill="#6b4f3a"/><path d="M-30 -30L0 -54L30 -30z" fill="#8e2a3a"/><rect x="-5" y="-16" width="10" height="18" fill="#3a2518"/><rect x="-20" y="-25" width="9" height="9" fill="#ffe27a"/><rect x="11" y="-25" width="9" height="9" fill="#ffe27a"/>',
   auberge: '<rect x="-30" y="-34" width="60" height="36" fill="#7a5a40"/><path d="M-36 -34L0 -58L36 -34z" fill="#5a3d2b"/><rect x="-6" y="-18" width="12" height="20" fill="#3a2518"/><rect x="-24" y="-26" width="10" height="10" fill="#ffe27a"/><rect x="14" y="-26" width="10" height="10" fill="#ffe27a"/><rect x="33" y="-42" width="2" height="24" fill="#3a2518"/><rect x="26" y="-40" width="14" height="9" fill="#e8c26a"/>',
   armurerie: '<rect x="-26" y="-28" width="52" height="30" fill="#4b4366"/><rect x="-31" y="-35" width="62" height="8" fill="#3a3350"/><rect x="12" y="-54" width="9" height="20" fill="#3a3350"/><circle cx="17" cy="-60" r="5" fill="rgba(200,200,220,.35)"/><rect x="-19" y="-20" width="16" height="22" fill="#e8742a"/><circle cx="13" cy="-14" r="8" fill="#b8b8c8"/><path d="M13 -20v12M7 -14h12" stroke="#5a5a70" stroke-width="2"/>',
-  taverne: '<rect x="-34" y="-26" width="68" height="28" fill="#6b4f3a"/><path d="M-40 -26L-28 -46H28L40 -26z" fill="#8a3a2a"/><rect x="-6" y="-16" width="12" height="18" fill="#2a1a10"/><rect x="-27" y="-20" width="12" height="9" fill="#ffe27a"/><rect x="15" y="-20" width="12" height="9" fill="#ffe27a"/><circle cx="-40" cy="-6" r="7" fill="#5a3d2b"/><circle cx="40" cy="-6" r="7" fill="#5a3d2b"/><rect x="-5" y="-55" width="10" height="9" fill="#e8c26a"/>'
+  taverne: '<rect x="-34" y="-26" width="68" height="28" fill="#6b4f3a"/><path d="M-40 -26L-28 -46H28L40 -26z" fill="#8a3a2a"/><rect x="-6" y="-16" width="12" height="18" fill="#2a1a10"/><rect x="-27" y="-20" width="12" height="9" fill="#ffe27a"/><rect x="15" y="-20" width="12" height="9" fill="#ffe27a"/><circle cx="-40" cy="-6" r="7" fill="#5a3d2b"/><circle cx="40" cy="-6" r="7" fill="#5a3d2b"/><rect x="-5" y="-55" width="10" height="9" fill="#e8c26a"/>',
+  survie: '<path d="M-32 2L0 -40L32 2z" fill="#4a6a5a"/><path d="M-7 2L0 -22L7 2z" fill="#1b2a22"/><rect x="0" y="-54" width="2" height="16" fill="#3a2518"/><path d="M2 -54l14 5l-14 5z" fill="#e05a5a"/><rect x="-46" y="-12" width="12" height="14" rx="5" fill="#6b6585"/><rect x="-41" y="-8" width="2" height="8" fill="#3a3350"/><rect x="-44" y="-5" width="8" height="2" fill="#3a3350"/>'
 };
 const SITE = '<rect x="-26" y="-22" width="52" height="24" fill="rgba(232,194,106,.12)" stroke="#e8c26a" stroke-width="2" stroke-dasharray="6 4"/><path d="M-26 2L-18 -26M26 2L18 -26" stroke="#8a6a3a" stroke-width="3"/><rect x="-20" y="-36" width="40" height="12" fill="#6b4f3a"/><text x="0" y="-27" text-anchor="middle" font-size="8" fill="#fff" font-family="sans-serif">chantier</text>';
 
