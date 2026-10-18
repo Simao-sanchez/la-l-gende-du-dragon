@@ -179,7 +179,7 @@ function loseGear() { // mort : le butin de la partie est perdu, ainsi que l’�
   }
   if (lostItems.length) { // la tombe apparaît au même endroit dans les parties des autres joueurs
     g.tomb = true;
-    sb("/graves", "POST", { player_id: me, name: meName, x: Math.round(g.p.x), y: Math.round(g.p.y), items: lostItems }, "return=minimal").catch(() => {});
+    sb("/graves", "POST", { player_id: me, level: g.lvKey, name: meName, x: Math.round(g.p.x), y: Math.round(g.p.y), items: lostItems }, "return=minimal").catch(() => {});
   }
 }
 function showError(retry) {
@@ -204,32 +204,40 @@ function newGame() {
   g = { state: "menu", t: 0, kills: 0, spawn: 0, cd: 0, ang: 0, pending: 0,
     p: { x: 0, y: 0, r: 12, hp: 100, max: 100, speed: 150, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
     w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0, mode: "proj", radius: 70 },
-    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], up: {}, ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, ammo: 0, nodes: [], packs: [], ok: false, left: false, exitT: 0, lost: [], graves: [], gravePoll: 8, graveT: 0, graveId: 0, looting: false, tomb: false, msg: "", msgT: 0 };
+    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], up: {}, ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, ammo: 0, nodes: [], packs: [], ok: false, left: false, exitT: 0, lost: [], lv: LEVELS.foret, lvKey: "foret", unlockedNow: false, graves: [], gravePoll: 8, graveT: 0, graveId: 0, looting: false, tomb: false, msg: "", msgT: 0 };
 }
 
+// Un niveau = décor, quantité de ressources et de monstres, force des monstres (hp, dmg), part de monstres d’élite (elite).
+const LEVELS = {
+  foret: { n: "Forêt", bg: "#14211a", grid: "#1c2d23", nodes: 16, packs: 7, enemies: 110, bosses: [[650, 850], [950, 1200]], hp: 1, dmg: 1, elite: 0, nodeBonus: 0,
+    d: "Des arbres épais cachent les monstres et les gisements. Peu de ressources, mais des monstres plus faibles. Vaincre un boss de la forêt ouvre la ville." },
+  ville: { n: "Ville en ruines", lock: "lvl_ville", hint: "Vaincs un boss de la forêt pour débloquer ce niveau.", bg: "#1a1c26", grid: "#242738", nodes: 55, packs: 11, enemies: 230,
+    bosses: [[600, 800], [850, 1000], [1050, 1220]], hp: 1.5, dmg: 1.4, elite: 0.12, nodeBonus: 1,
+    d: "Des rues en ruines, beaucoup de ressources, mais des monstres bien plus nombreux et plus forts." }
+};
 const HALF = 1300; // rayon de la carte ; la sortie est au centre, là où l’on commence
 function spawnAt(x, y, aggro, boss) { // plus on s’éloigne de la sortie, plus les monstres sont nombreux et solides
-  const R = HALF - 20, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
-  const d = Math.hypot(x, y), r = Math.random(), sc = 1 + d / 900 + g.t / 240;
+  const L = g.lv, R = HALF - 20, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
+  const d = Math.hypot(x, y), r = Math.random() - L.elite, sc = (1 + d / 900 + g.t / 240) * L.hp;
   if (boss) { const hp = 450 * sc, e = { x, y, r: 34, hp, max: hp, sp: 52, oc: 0, k: 3, boss: true, ph: 0, aggro: !!aggro }; g.enemies.push(e); return e; }
   const type = d > 900 ? (r < 0.3 ? 2 : r < 0.6 ? 1 : 0) : d > 550 ? (r < 0.12 ? 2 : r < 0.4 ? 1 : 0) : (r < 0.2 ? 1 : 0);
   const T = [{ r: 10, hp: 15, sp: 60, c: "#e05a5a" }, { r: 8, hp: 9, sp: 115, c: "#e8a838" }, { r: 18, hp: 70, sp: 42, c: "#a35ae0" }][type];
   const e = { x, y, r: T.r, hp: T.hp * sc, sp: T.sp * (0.9 + Math.random() * 0.2), c: T.c, oc: 0, k: type, ph: Math.random() * 6, aggro: !!aggro };
   g.enemies.push(e); return e;
 }
-function genWorld() { // remplit la carte : gisements d’éclats, caisses de munitions, monstres et deux boss gardiens
-  const rnd = (a, b) => a + Math.random() * (b - a);
+function genWorld() { // remplit la carte selon le niveau : gisements, caisses de munitions, monstres et boss gardiens
+  const L = g.lv, rnd = (a, b) => a + Math.random() * (b - a);
   const pos = (dmin, dmax) => { const a = rnd(0, 6.283), d = Math.sqrt(rnd(dmin * dmin, dmax * dmax)); return { x: Math.cos(a) * d, y: Math.sin(a) * d }; };
-  for (let i = 0; i < 40; i++) { const q = pos(180, 1250); g.nodes.push({ x: q.x, y: q.y, v: 1 + Math.floor(Math.hypot(q.x, q.y) / 350) + (Math.random() < 0.3 ? 1 : 0), prog: 0, ph: Math.random() * 6 }); }
-  for (let i = 0; i < 14; i++) { const q = pos(150, 1250); g.packs.push({ x: q.x, y: q.y, v: 25 }); }
-  for (let i = 0; i < 150; i++) { const q = pos(300, 1250); spawnAt(q.x, q.y, false); }
-  for (const [a, b] of [[650, 850], [950, 1200]]) { const q = pos(a, b); spawnAt(q.x, q.y, false, true); }
+  for (let i = 0; i < L.nodes; i++) { const q = pos(180, 1250); g.nodes.push({ x: q.x, y: q.y, v: 1 + Math.floor(Math.hypot(q.x, q.y) / 350) + (Math.random() < 0.3 ? 1 : 0) + L.nodeBonus, prog: 0, ph: Math.random() * 6 }); }
+  for (let i = 0; i < L.packs; i++) { const q = pos(150, 1250); g.packs.push({ x: q.x, y: q.y, v: 15 }); }
+  for (let i = 0; i < L.enemies; i++) { const q = pos(300, 1250); spawnAt(q.x, q.y, false); }
+  for (const [a, b] of L.bosses) { const q = pos(a, b); spawnAt(q.x, q.y, false, true); }
 }
 
 // ====== Mise à jour (appelée à chaque image) ======
 async function refreshGraves() { // toutes les 8 s : nouvelles tombes, et tombes déjà libérées par d’autres joueurs
   const cur = g;
-  try { const list = await sb("/graves?select=*"); if (g === cur && g.state !== "over") g.graves = list; } catch (e) {}
+  try { const list = await sb("/graves?select=*&level=eq." + g.lvKey); if (g === cur && g.state !== "over") g.graves = list; } catch (e) {}
 }
 async function lootGrave(gr) { // la tombe disparaît pour tous ; son propriétaire récupère un ou plusieurs équipements perdus
   g.looting = true;
@@ -308,7 +316,7 @@ function update(dt) {
   }
   g.nodes = g.nodes.filter(n => !n.got);
   for (const k of g.packs) if (Math.hypot(k.x - p.x, k.y - p.y) < p.r + 16) { // caisses de munitions
-    k.got = true; g.ammo = Math.min(250, g.ammo + k.v); g.msg = "+" + k.v + " munitions"; g.msgC = "#ffe27a"; g.msgT = 1.5;
+    k.got = true; g.ammo = Math.min(120, g.ammo + k.v); g.msg = "+" + k.v + " munitions"; g.msgC = "#ffe27a"; g.msgT = 1.5;
   }
   g.packs = g.packs.filter(k => !k.got);
   g.gravePoll -= dt; // tombes : mise à jour régulière, puis pillage en restant dessus 3 secondes
@@ -392,14 +400,17 @@ function update(dt) {
     if (!e.aggro && d < (e.boss ? 380 : 260)) e.aggro = true;
     else if (e.aggro && d > (e.boss ? 900 : 650)) e.aggro = false;
     if (e.aggro) { e.x += dx / d * e.sp * dt; e.y += dy / d * e.sp * dt; }
-    if (d < e.r + p.r && p.inv <= 0) { p.hp -= (e.boss ? 18 : 8) + g.t / 60; p.inv = 0.5; g.exitT = 0; g.graveT = 0; }
+    if (d < e.r + p.r && p.inv <= 0) { p.hp -= ((e.boss ? 18 : 8) + g.t / 60) * g.lv.dmg; p.inv = 0.5; g.exitT = 0; g.graveT = 0; }
   }
   // Mort des ennemis : ils laissent une gemme d’expérience
   for (const e of g.enemies) if (e.hp <= 0) {
     if (g.xpOn) g.gems.push({ x: e.x, y: e.y, v: e.boss ? 15 : e.r > 15 ? 3 : 1 }); g.kills++;
     if (e.boss) for (let i = 0; i < 3; i++) g.shards.push({ x: e.x + (i - 1) * 24, y: e.y, ph: i });
     if (e.boss) g.shards.push({ x: e.x, y: e.y + 28, ph: 1, f: true }); // fragment de boss
-    if (Math.random() < 0.12) g.packs.push({ x: e.x, y: e.y - 8, v: 6 }); // petite réserve de munitions
+    if (e.boss && g.lvKey === "foret" && !town.lvl_ville) { // boss de la forêt vaincu : la ville est débloquée
+      town.lvl_ville = 1; g.unlockedNow = true; saveRemote(true); g.msg = "Niveau débloqué : la ville !"; g.msgC = "#ffd36b"; g.msgT = 5;
+    }
+    if (Math.random() < 0.10) g.packs.push({ x: e.x, y: e.y - 8, v: 4 }); // petite réserve de munitions
     if (g.lootOn && (e.boss || Math.random() < 0.012)) g.loot.push({ x: e.x, y: e.y + 10, it: rollItem(!!e.boss), ph: Math.random() * 6 });
   }
   g.enemies = g.enemies.filter(e => e.hp > 0);
@@ -487,29 +498,73 @@ function drawHero(p) {
   ctx.fillRect(s * 2 - 1, -9, 2, 3);
   ctx.restore();
 }
-function decor(cx, cy) { // pierres tombales et touffes d’herbe, placées par un calcul fixe
-  const cs = 150;
+function decor(cx, cy) { // décor du niveau, placé par un calcul fixe : identique pour tous les joueurs
+  const city = g.lvKey === "ville", cs = 150;
+  if (city) { // rues (quadrillage) et ruines d’immeubles : dalle et murs avec une ouverture
+    const st = 360, rw = 64, x1 = Math.floor((cx - rw) / st) * st, y1 = Math.floor((cy - rw) / st) * st;
+    ctx.fillStyle = "#2b2e3d";
+    for (let x = x1; x < cx + W + rw; x += st) ctx.fillRect(x - rw / 2, cy - 10, rw, H + 20);
+    for (let y = y1; y < cy + H + rw; y += st) ctx.fillRect(cx - 10, y - rw / 2, W + 20, rw);
+    ctx.fillStyle = "#6a6440";
+    for (let x = x1; x < cx + W + rw; x += st) for (let y = Math.floor(cy / 40) * 40; y < cy + H + 40; y += 40) ctx.fillRect(x - 1.5, y, 3, 18);
+    for (let y = y1; y < cy + H + rw; y += st) for (let x = Math.floor(cx / 40) * 40; x < cx + W + 40; x += 40) ctx.fillRect(x, y - 1.5, 18, 3);
+    for (let i = Math.floor(cx / st) - 1; i <= (cx + W) / st; i++) for (let j = Math.floor(cy / st) - 1; j <= (cy + H) / st; j++) {
+      if (Math.abs(Math.sin(i * 91.7 + j * 173.1) * 12345.6) % 1 > 0.8) continue; // certains îlots restent vides
+      const x0 = i * st + rw / 2 + 24, y0 = j * st + rw / 2 + 24, bw = st - rw - 48;
+      ctx.fillStyle = "#1f2230"; ctx.fillRect(x0, y0, bw, bw);
+      ctx.strokeStyle = "#4a506c"; ctx.lineWidth = 7; ctx.beginPath();
+      ctx.moveTo(x0, y0 + bw); ctx.lineTo(x0, y0); ctx.lineTo(x0 + bw, y0); ctx.lineTo(x0 + bw, y0 + bw);
+      ctx.moveTo(x0, y0 + bw); ctx.lineTo(x0 + bw * 0.32, y0 + bw); ctx.moveTo(x0 + bw * 0.68, y0 + bw); ctx.lineTo(x0 + bw, y0 + bw);
+      ctx.stroke();
+    }
+  }
   for (let i = Math.floor(cx / cs) - 1; i <= (cx + W) / cs; i++)
     for (let j = Math.floor(cy / cs) - 1; j <= (cy + H) / cs; j++) {
       const h = Math.abs(Math.sin(i * 127.1 + j * 311.7) * 43758.5) % 1;
       if (h > 0.45) continue;
       const x = i * cs + ((h * 9973) % 1) * cs, y = j * cs + ((h * 7919) % 1) * cs;
-      if (h < 0.2) {
-        ctx.fillStyle = "#3a3350"; ctx.beginPath(); ctx.roundRect(x - 8, y - 14, 16, 20, [8, 8, 2, 2]); ctx.fill();
-        ctx.fillStyle = "#4b4366"; ctx.fillRect(x - 1, y - 11, 2, 9); ctx.fillRect(x - 4, y - 8, 8, 2);
-      } else {
-        ctx.strokeStyle = "#2c3a3a"; ctx.lineWidth = 2; ctx.beginPath();
-        for (let k = -1; k <= 1; k++) { ctx.moveTo(x + k * 4, y); ctx.lineTo(x + k * 6, y - 8); }
+      if (city && h < 0.12) { // lampadaire
+        ctx.fillStyle = "rgba(255,226,122,.12)"; ctx.beginPath(); ctx.arc(x, y - 22, 30, 0, 6.283); ctx.fill();
+        ctx.fillStyle = "#4a506c"; ctx.fillRect(x - 1.5, y - 22, 3, 24); ctx.fillStyle = "#ffe27a"; ctx.beginPath(); ctx.arc(x, y - 24, 4, 0, 6.283); ctx.fill();
+      } else if (city && h < 0.25) { // épave de voiture
+        ctx.fillStyle = "#3a3f52"; ctx.beginPath(); ctx.roundRect(x - 17, y - 8, 34, 16, 4); ctx.fill();
+        ctx.fillStyle = "#2a2d3b"; ctx.fillRect(x - 9, y - 6, 18, 12); ctx.fillStyle = "#14161d"; ctx.fillRect(x - 14, y + 6, 7, 4); ctx.fillRect(x + 7, y + 6, 7, 4);
+      } else if (city) { // gravats
+        ctx.fillStyle = "#3c4058"; ctx.fillRect(x - 8, y - 3, 9, 6); ctx.fillRect(x + 1, y - 6, 7, 6); ctx.fillRect(x - 3, y + 2, 8, 5);
+      } else if (h < 0.1) { // rocher
+        ctx.fillStyle = "#3b463f"; ctx.beginPath(); ctx.ellipse(x, y, 13, 9, 0, 0, 6.283); ctx.fill();
+        ctx.fillStyle = "#4b584f"; ctx.beginPath(); ctx.ellipse(x - 3, y - 3, 7, 4, 0, 0, 6.283); ctx.fill();
+      } else if (h < 0.2) { // champignon
+        ctx.fillStyle = "#cfc6b0"; ctx.fillRect(x - 1.5, y - 4, 3, 7); ctx.fillStyle = "#b8453f"; ctx.beginPath(); ctx.arc(x, y - 4, 6, Math.PI, 0); ctx.fill();
+      } else { // touffe d’herbe
+        ctx.strokeStyle = "#2f5a3a"; ctx.lineWidth = 2; ctx.beginPath();
+        for (let k = -1; k <= 1; k++) { ctx.moveTo(x + k * 4, y); ctx.lineTo(x + k * 6, y - 9); }
         ctx.stroke();
       }
     }
+}
+function drawTrees(cx, cy) { // forêt : les cimes cachent ce qui est dessous (monstres, gisements, tombes…), sauf près du héros
+  if (g.lvKey !== "foret") return;
+  const cs = 80, p = g.p;
+  for (let i = Math.floor(cx / cs) - 1; i <= (cx + W) / cs + 1; i++)
+    for (let j = Math.floor(cy / cs) - 1; j <= (cy + H) / cs + 1; j++) {
+      const h = Math.abs(Math.sin(i * 53.7 + j * 211.3) * 31415.9) % 1;
+      if (h > 0.6) continue;
+      const x = i * cs + ((h * 9973) % 1) * cs, y = j * cs + ((h * 7919) % 1) * cs, r = 26 + ((h * 4409) % 1) * 14, dx = Math.hypot(x, y);
+      if (dx < 120 || dx > HALF + 40) continue; // la sortie reste dégagée
+      ctx.globalAlpha = Math.max(0.3, Math.min(0.96, (Math.hypot(x - p.x, y - p.y) - 25) / 70)); // la cime devient transparente près du héros
+      ctx.fillStyle = "#3a2a1c"; ctx.fillRect(x - 4, y - 2, 8, 20);
+      ctx.fillStyle = "#143a24"; ctx.beginPath(); ctx.arc(x, y - 10, r, 0, 6.283); ctx.fill();
+      ctx.fillStyle = "#1d5432"; ctx.beginPath(); ctx.arc(x - r * 0.25, y - 10 - r * 0.25, r * 0.7, 0, 6.283); ctx.fill();
+    }
+  ctx.globalAlpha = 1;
 }
 
 // ====== Dessin ======
 function draw() {
   const p = g.p, cx = p.x - W / 2, cy = p.y - H / 2;
-  ctx.fillStyle = "#1b1726"; ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = "#282139"; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.fillStyle = g.lv.bg; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = g.lv.grid; ctx.lineWidth = 1; ctx.beginPath();
   const gs = 64, ox = -(((cx % gs) + gs) % gs), oy = -(((cy % gs) + gs) % gs);
   for (let x = ox; x < W; x += gs) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
   for (let y = oy; y < H; y += gs) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
@@ -578,6 +633,7 @@ function draw() {
     const a = g.ang + i * 6.283 / g.w.orbs;
     ctx.fillStyle = "#9fd8ff"; ctx.beginPath(); ctx.arc(p.x + Math.cos(a) * 60, p.y + Math.sin(a) * 60, 9, 0, 6.283); ctx.fill();
   }
+  drawTrees(cx, cy);
   ctx.globalAlpha = p.inv > 0 && Math.floor(g.t * 20) % 2 ? 0.4 : 1;
   drawHero(p);
   ctx.globalAlpha = 1; ctx.restore();
@@ -591,7 +647,7 @@ function draw() {
   ctx.fillText((g.xpOn ? "Niv. " + p.lvl + "   " : "") + "Victimes : " + g.kills, 12, 48);
   ctx.fillStyle = "#8fe3ff"; ctx.fillText("Butin : " + g.run + " éclats" + (g.runF ? " · " + g.runF + " fragment" + (g.runF > 1 ? "s" : "") : "") + (g.found.length ? " · " + g.found.length + " équip." : ""), 12, 66); ctx.fillStyle = "#f0eaf7";
   ctx.fillStyle = g.ammo > 0 ? "#ffe27a" : "#ff6a6a"; ctx.fillText("Munitions : " + g.ammo + (g.ammo > 0 ? "" : " (coups de poing)"), 12, 84); ctx.fillStyle = "#f0eaf7";
-  ctx.textAlign = "right"; ctx.fillText(fmt(g.t), W - 12, 30);
+  ctx.textAlign = "right"; ctx.fillText(fmt(g.t), W - 12, 30); ctx.fillText(g.lv.n, W - 12, 48);
   if (g.dashOn) { // bouton de dash (aussi : Espace ou Maj)
     const bx = W - 50, by = H - 50, ready = g.dashCdT <= 0, k = ready ? 1 : 1 - g.dashCdT / g.dashCd;
     ctx.fillStyle = "rgba(20,16,30,.55)"; ctx.beginPath(); ctx.arc(bx, by, 30, 0, 6.283); ctx.fill();
@@ -672,11 +728,28 @@ function cityState() { // les dons s’accumulent : chaque bâtiment consomme so
 const has = k => BUILDINGS.findIndex(b => b.k === k) <= cityState().nb;
 
 // ====== Lancer une partie ======
-function play() { if (has("taverne")) showClasses(); else startGame("base"); }
-async function startGame(cls) {
+function showLevels(cls) { // étape de choix du niveau, après le choix de la classe
+  show("<h2>Choisis ton niveau</h2><p>Chaque niveau a ses dangers et ses richesses.</p>");
+  const card = ov.firstChild;
+  for (const [k, L] of Object.entries(LEVELS)) {
+    const open = !L.lock || town[L.lock];
+    const b = document.createElement("button");
+    b.className = "opt"; b.innerHTML = "<b></b><span></span>"; b.disabled = !open;
+    b.firstChild.textContent = L.n + (open ? "" : " (verrouillé)");
+    b.lastChild.textContent = open ? L.d : L.hint;
+    if (open) b.onclick = () => startGame(cls, k);
+    card.appendChild(b);
+  }
+  const back = document.createElement("button");
+  back.textContent = "Retour"; back.onclick = leaveTown;
+  card.appendChild(back);
+}
+function play() { if (has("taverne")) showClasses(); else showLevels("base"); }
+async function startGame(cls, lvl) { // lvl = clé du niveau (forêt par défaut)
+  const lvKey = LEVELS[lvl] ? lvl : "foret";
   try { await loadCity(); } catch (e) {} // état du camp à jour
-  let graves = []; try { graves = await sb("/graves?select=*"); } catch (e) {} // tombes des joueurs morts
-  newGame(); g.state = "play"; ov.hidden = true; g.graves = graves;
+  let graves = []; try { graves = await sb("/graves?select=*&level=eq." + lvKey); } catch (e) {} // tombes des joueurs morts
+  newGame(); g.state = "play"; ov.hidden = true; g.graves = graves; g.lvKey = lvKey; g.lv = LEVELS[lvKey];
   g.xpOn = has("auberge"); g.lootOn = has("armurerie"); g.xpMul = 1; g.cls = CLASSES[cls] ? cls : "base";
   g.p.max += 10 * (town.maison || 0); // maison
   if (CLASSES[cls]) {
@@ -694,7 +767,7 @@ async function startGame(cls) {
     }
   }
   g.p.hp = g.p.max;
-  g.ammo = { guerrier: 90, archer: 140, mage: 100 }[g.cls] || 120; // munitions de départ selon la classe
+  g.ammo = { guerrier: 45, archer: 70, mage: 50 }[g.cls] || 60; // munitions de départ selon la classe
   genWorld();
   g.msg = "Récolte des éclats, puis reviens à la sortie !"; g.msgC = "#ffd36b"; g.msgT = 5;
 }
@@ -720,6 +793,7 @@ function showOver() {
     (g.runF ? "<br>Fragments de boss : <b>" + g.runF + "</b>" + (ok ? " (total : " + frag + ")" : " perdus") : "") + "</p>" +
     (g.lootOn ? "<p>Équipements trouvés : " + (g.found.length ? names + (ok ? "" : " (perdus)") : "aucun") + ".</p>" : "") +
     (!ok && g.lost.length ? "<p>Équipement perdu : " + g.lost.map(it => it.data.name).join(", ") + ".</p>" : "") +
+    (g.unlockedNow ? "<p><b>Niveau débloqué : la ville en ruines !</b> Tu pourras la choisir au prochain départ.</p>" : "") +
     (!ok && g.tomb ? "<p>Ta tombe est apparue là où tu es tombé. Si un joueur reste dessus quelques secondes, tu récupères un de tes équipements perdus.</p>" : "") +
     "<button id='again'>Repartir</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : ""));
   document.getElementById("again").onclick = play;
@@ -864,7 +938,7 @@ function showClasses() {
     b.lastChild.textContent = C.d + (open ? "" : " Débloquer : " + C.cost + " éclats.");
     if (open) {
       if ((stats.classe || "guerrier") === k) b.style.borderLeft = "6px solid var(--accent)";
-      b.onclick = () => { stats.classe = k; saveRemote(true); startGame(k); };
+      b.onclick = () => { stats.classe = k; saveRemote(true); showLevels(k); };
     } else {
       b.disabled = bank < C.cost;
       b.onclick = () => { bank -= C.cost; town["cl_" + k] = 1; saveRemote(true); showClasses(); };
@@ -968,6 +1042,7 @@ function showTestTools() {
   };
   add("+10 fragments de boss", testAddFrag);
   add("+100 éclats de lune", testAddShards);
+  add("Débloquer la ville", () => { town.lvl_ville = 1; saveRemote(true); showTestTools(); });
   add(resetPending ? "Confirmer : tout effacer" : "Effacer toute ma sauvegarde", testReset, true);
   add("Retour", () => { resetPending = false; showMenu(); }, true);
 }
