@@ -155,13 +155,24 @@ async function loadProfile(i) {
   try { await loadCity(); } catch (e) {}
   try { localStorage.setItem("veillee_dernier", i); } catch (e) {} // le navigateur retient le dernier joueur
 }
-function endRun() { // met à jour les statistiques en fin de partie
+function endRun(ok) { // ok = évacuation réussie ; sinon le joueur est mort
   stats.parties = (stats.parties || 0) + 1;
   stats.victimes = (stats.victimes || 0) + g.kills;
   stats.meilleurTemps = Math.max(stats.meilleurTemps || 0, Math.floor(g.t));
   stats.meilleurNiveau = Math.max(stats.meilleurNiveau || 0, g.p.lvl);
-  saveLoot();
+  if (ok) { // le butin n’est gardé que si on sort vivant
+    stats.evacuations = (stats.evacuations || 0) + 1;
+    bank += g.run; frag += g.runF; saveLoot();
+  } else loseGear();
   saveRemote(true);
+}
+function loseGear() { // mort : le butin de la partie est perdu, ainsi que l’équipement porté
+  const ids = g.lootOn ? Object.values(stats.equip || {}) : [];
+  g.lost = inv.filter(it => ids.includes(it.id));
+  if (g.lost.length) {
+    inv = inv.filter(it => !ids.includes(it.id)); stats.equip = {};
+    sb("/items?id=in.(" + ids.join(",") + ")", "DELETE").catch(() => {});
+  }
 }
 function showError(retry) {
   show("<h2>Connexion impossible</h2><p>Le jeu n’arrive pas à joindre la base de données. Vérifie ta connexion, puis réessaie.</p><button id='retry'>Réessayer</button>");
@@ -185,19 +196,31 @@ function newGame() {
   g = { state: "menu", t: 0, kills: 0, spawn: 0, cd: 0, ang: 0, pending: 0,
     p: { x: 0, y: 0, r: 12, hp: 100, max: 100, speed: 150, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
     w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0, mode: "proj", radius: 70 },
-    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], up: {}, ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, nextBoss: 90, nextShard: 4, msg: "", msgT: 0 };
+    enemies: [], shots: [], gems: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], up: {}, ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, ammo: 0, nodes: [], packs: [], ok: false, left: false, exitT: 0, lost: [], msg: "", msgT: 0 };
 }
 
-function spawnEnemy() {
-  const a = Math.random() * 6.283, d = Math.max(W, H) / 2 + 40, r = Math.random();
-  const type = (g.t > 60 && r < 0.15) ? 2 : (g.t > 25 && r < 0.4) ? 1 : 0;
+const HALF = 1300; // rayon de la carte ; la sortie est au centre, là où l’on commence
+function spawnAt(x, y, aggro, boss) { // plus on s’éloigne de la sortie, plus les monstres sont nombreux et solides
+  const R = HALF - 20, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
+  const d = Math.hypot(x, y), r = Math.random(), sc = 1 + d / 900 + g.t / 240;
+  if (boss) { const hp = 450 * sc, e = { x, y, r: 34, hp, max: hp, sp: 52, oc: 0, k: 3, boss: true, ph: 0, aggro: !!aggro }; g.enemies.push(e); return e; }
+  const type = d > 900 ? (r < 0.3 ? 2 : r < 0.6 ? 1 : 0) : d > 550 ? (r < 0.12 ? 2 : r < 0.4 ? 1 : 0) : (r < 0.2 ? 1 : 0);
   const T = [{ r: 10, hp: 15, sp: 60, c: "#e05a5a" }, { r: 8, hp: 9, sp: 115, c: "#e8a838" }, { r: 18, hp: 70, sp: 42, c: "#a35ae0" }][type];
-  g.enemies.push({ x: g.p.x + Math.cos(a) * d, y: g.p.y + Math.sin(a) * d, r: T.r, hp: T.hp * (1 + g.t / 90), sp: T.sp * (0.9 + Math.random() * 0.2), c: T.c, oc: 0, k: type, ph: Math.random() * 6 });
+  const e = { x, y, r: T.r, hp: T.hp * sc, sp: T.sp * (0.9 + Math.random() * 0.2), c: T.c, oc: 0, k: type, ph: Math.random() * 6, aggro: !!aggro };
+  g.enemies.push(e); return e;
+}
+function genWorld() { // remplit la carte : gisements d’éclats, caisses de munitions, monstres et deux boss gardiens
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const pos = (dmin, dmax) => { const a = rnd(0, 6.283), d = Math.sqrt(rnd(dmin * dmin, dmax * dmax)); return { x: Math.cos(a) * d, y: Math.sin(a) * d }; };
+  for (let i = 0; i < 40; i++) { const q = pos(180, 1250); g.nodes.push({ x: q.x, y: q.y, v: 1 + Math.floor(Math.hypot(q.x, q.y) / 350) + (Math.random() < 0.3 ? 1 : 0), prog: 0, ph: Math.random() * 6 }); }
+  for (let i = 0; i < 14; i++) { const q = pos(150, 1250); g.packs.push({ x: q.x, y: q.y, v: 25 }); }
+  for (let i = 0; i < 150; i++) { const q = pos(300, 1250); spawnAt(q.x, q.y, false); }
+  for (const [a, b] of [[650, 850], [950, 1200]]) { const q = pos(a, b); spawnAt(q.x, q.y, false, true); }
 }
 
 // ====== Mise à jour (appelée à chaque image) ======
 function dealDamage(e, d) { // tous les dégâts du joueur passent ici (vol de vie du guerrier)
-  const real = Math.min(d, Math.max(0, e.hp)); e.hp -= d;
+  e.aggro = true; const real = Math.min(d, Math.max(0, e.hp)); e.hp -= d;
   if (g.ls) g.p.hp = Math.min(g.p.max, g.p.hp + real * g.ls);
 }
 function explode(x, y, src) { // flèches explosives de l’archer
@@ -229,51 +252,60 @@ function update(dt) {
   } else { p.x += mx * p.speed * dt; p.y += my * p.speed * dt; }
   if (g.regen) p.hp = Math.min(p.max, p.hp + g.regen * dt);
   p.mov = !!(mx || my); if (mx) p.face = mx > 0 ? 1 : -1;
+  const rr = Math.hypot(p.x, p.y); if (rr > HALF) { p.x *= HALF / rr; p.y *= HALF / rr; } // bord de la carte
+  // Évacuation : reste 2 secondes dans la zone de sortie, une fois que tu t’en es éloigné
+  if (rr > 300) g.left = true;
+  if (rr < 55 && g.left) {
+    g.exitT += dt;
+    if (g.exitT >= 2) { g.ok = true; g.state = "over"; endRun(true); showOver(); return; }
+  } else g.exitT = Math.max(0, g.exitT - dt * 2);
 
-  // Apparition des ennemis : de plus en plus nombreux avec le temps
+  // Renforts : après 2 min 30, des monstres te traquent (il est temps de repartir)
   g.spawn -= dt;
-  if (g.spawn <= 0 && g.enemies.length < 300) {
-    g.spawn = Math.max(0.12, 0.8 - g.t / 150);
-    const n = 1 + Math.floor(g.t / 45);
-    for (let i = 0; i < n; i++) spawnEnemy();
-  }
-
-  // Boss toutes les 90 secondes
-  if (g.t >= g.nextBoss) {
-    g.nextBoss += 90;
-    const a = Math.random() * 6.283, d = Math.max(W, H) / 2 + 80, hp = 300 * (1 + g.t / 100);
-    g.enemies.push({ x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d, r: 34, hp, max: hp, sp: 52, oc: 0, k: 3, boss: true, ph: 0 });
-    g.msg = "Un boss approche !"; g.msgT = 3; g.msgC = null;
+  if (g.t > 150 && g.spawn <= 0 && g.enemies.length < 260) {
+    g.spawn = Math.max(1.5, 9 - (g.t - 150) / 40);
+    const a = Math.random() * 6.283, d = Math.max(W, H) / 2 + 40;
+    spawnAt(p.x + Math.cos(a) * d, p.y + Math.sin(a) * d, true);
   }
   g.msgT -= dt;
-  // Éclats de lune : apparaissent sur la carte, à ramasser à pied
-  g.nextShard -= dt;
-  if (g.nextShard <= 0 && g.shards.length < 5) {
-    g.nextShard = 6; const a = Math.random() * 6.283, d = 220 + Math.random() * 280;
-    g.shards.push({ x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d, ph: Math.random() * 6 });
-  }
-  for (const s of g.shards) if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + 14) { s.got = true; if (s.f) { g.runF++; frag++; g.msg = "Fragment de boss !"; g.msgC = "#ff7a7a"; g.msgT = 2; } else { g.run++; bank++; } saveBank(); }
+  for (const s of g.shards) if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + 14) { s.got = true; if (s.f) { g.runF++; g.msg = "Fragment de boss !"; g.msgC = "#ff7a7a"; g.msgT = 2; } else g.run++; }
   g.shards = g.shards.filter(s => !s.got && Math.hypot(s.x - p.x, s.y - p.y) < 1000);
   for (const l of g.loot) if (Math.hypot(l.x - p.x, l.y - p.y) < p.r + 16) {
     l.got = true; g.found.push(l.it); g.msg = "Trouvé : " + l.it.name; g.msgC = RAR_C[l.it.r]; g.msgT = 2.5;
   }
   g.loot = g.loot.filter(l => !l.got && Math.hypot(l.x - p.x, l.y - p.y) < 1400);
+  for (const n of g.nodes) { // récolte : reste près d’un gisement pour le vider
+    if (Math.hypot(n.x - p.x, n.y - p.y) < 36) {
+      n.prog += dt;
+      if (n.prog >= 1.2) { n.got = true; g.run += n.v; g.msg = "+" + n.v + " éclat" + (n.v > 1 ? "s" : ""); g.msgC = "#8fe3ff"; g.msgT = 1.5; }
+    } else n.prog = Math.max(0, n.prog - dt * 0.5);
+  }
+  g.nodes = g.nodes.filter(n => !n.got);
+  for (const k of g.packs) if (Math.hypot(k.x - p.x, k.y - p.y) < p.r + 16) { // caisses de munitions
+    k.got = true; g.ammo = Math.min(250, g.ammo + k.v); g.msg = "+" + k.v + " munitions"; g.msgC = "#ffe27a"; g.msgT = 1.5;
+  }
+  g.packs = g.packs.filter(k => !k.got);
 
-  // Attaque automatique : tir (aventurier, archer), coup d’épée (guerrier) ou zone magique (mage)
+  // Attaque automatique : tir (aventurier, archer), coup d’épée (guerrier) ou zone magique (mage). Chaque attaque coûte 1 munition.
   g.cd -= dt;
   if (g.cd <= 0) {
     const d2 = e => (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
     const near = g.enemies.filter(e => d2(e) < 420 * 420).sort((a, b) => d2(a) - d2(b));
-    if (w.mode === "slash") {
+    const mode = g.ammo > 0 ? w.mode : "fist"; // sans munitions : de simples coups de poing
+    if (mode === "fist") {
+      if (near.length && Math.sqrt(d2(near[0])) < 34 + near[0].r) {
+        dealDamage(near[0], w.dmg * 0.35); g.fx.push({ follow: true, r: 30, t: 0.12, c: "#cfcfcf" }); g.cd = 0.9;
+      }
+    } else if (mode === "slash") {
       if (near.length && Math.sqrt(d2(near[0])) < w.radius + near[0].r + 10) {
         for (const e of g.enemies) if (Math.sqrt(d2(e)) < w.radius + e.r) dealDamage(e, w.dmg);
         g.fx.push({ follow: true, r: w.radius, t: 0.18, c: "#ffe9b0" });
-        g.cd = w.rate;
+        g.cd = w.rate; g.ammo--;
       }
-    } else if (w.mode === "zone") {
+    } else if (mode === "zone") {
       if (near.length) {
         for (let i = 0; i < w.count && i < near.length; i++) g.zones.push({ x: near[i].x, y: near[i].y, t: 0.4, r: w.radius, d: w.dmg * 1.6 });
-        g.cd = w.rate;
+        g.cd = w.rate; g.ammo--;
       }
     } else if (near.length) {
       const base = Math.atan2(near[0].y - p.y, near[0].x - p.x);
@@ -281,7 +313,7 @@ function update(dt) {
         const a = base + (i - (w.count - 1) / 2) * 0.18;
         g.shots.push({ x: p.x, y: p.y, vx: Math.cos(a) * 380, vy: Math.sin(a) * 380, life: 1.2, pl: w.pierce, hit: [] });
       }
-      g.cd = w.rate;
+      g.cd = w.rate; g.ammo--;
     }
   }
   for (const z of g.zones) { // les zones magiques explosent après un court délai
@@ -319,18 +351,21 @@ function update(dt) {
     for (const e of g.enemies) if (e.oc <= 0 && Math.hypot(e.x - ox, e.y - oy) < e.r + 9) { dealDamage(e, w.orbDmg); e.oc = 0.4; }
   }
 
-  // Ennemis : poursuite du joueur et contact
+  // Ennemis : immobiles jusqu’à ce qu’ils te repèrent, puis ils te poursuivent (ils perdent ta trace si tu t’éloignes)
   for (const e of g.enemies) {
     e.oc -= dt;
     const dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy) || 1;
-    e.x += dx / d * e.sp * dt; e.y += dy / d * e.sp * dt;
-    if (d < e.r + p.r && p.inv <= 0) { p.hp -= (e.boss ? 18 : 8) + g.t / 60; p.inv = 0.5; }
+    if (!e.aggro && d < (e.boss ? 380 : 260)) e.aggro = true;
+    else if (e.aggro && d > (e.boss ? 900 : 650)) e.aggro = false;
+    if (e.aggro) { e.x += dx / d * e.sp * dt; e.y += dy / d * e.sp * dt; }
+    if (d < e.r + p.r && p.inv <= 0) { p.hp -= (e.boss ? 18 : 8) + g.t / 60; p.inv = 0.5; g.exitT = 0; }
   }
   // Mort des ennemis : ils laissent une gemme d’expérience
   for (const e of g.enemies) if (e.hp <= 0) {
     if (g.xpOn) g.gems.push({ x: e.x, y: e.y, v: e.boss ? 15 : e.r > 15 ? 3 : 1 }); g.kills++;
     if (e.boss) for (let i = 0; i < 3; i++) g.shards.push({ x: e.x + (i - 1) * 24, y: e.y, ph: i });
     if (e.boss) g.shards.push({ x: e.x, y: e.y + 28, ph: 1, f: true }); // fragment de boss
+    if (Math.random() < 0.12) g.packs.push({ x: e.x, y: e.y - 8, v: 6 }); // petite réserve de munitions
     if (g.lootOn && (e.boss || Math.random() < 0.012)) g.loot.push({ x: e.x, y: e.y + 10, it: rollItem(!!e.boss), ph: Math.random() * 6 });
   }
   g.enemies = g.enemies.filter(e => e.hp > 0);
@@ -346,7 +381,7 @@ function update(dt) {
   }
   g.gems = g.gems.filter(m => m.v > 0);
 
-  if (p.hp <= 0) { p.hp = 0; g.state = "over"; endRun(); showOver(); }
+  if (p.hp <= 0) { p.hp = 0; g.state = "over"; endRun(false); showOver(); }
   else if (g.pending > 0) showLevelUp();
 }
 
@@ -355,6 +390,17 @@ function eyes(dx, dy, s, c) {
   ctx.fillStyle = c;
   ctx.beginPath(); ctx.arc(-dx, dy, s, 0, 6.283); ctx.fill();
   ctx.beginPath(); ctx.arc(dx, dy, s, 0, 6.283); ctx.fill();
+}
+// ====== Images (sprites) : le fichier doit être déposé à côté de index.html sur GitHub ======
+const SLIME = new Image(); SLIME.src = "SlimeBlue_Walking.png"; // planche de 6 images de 64×64 pixels
+const SLIME_SCALE = 0.75, SLIME_FPS = 10; // taille d’affichage et vitesse de l’animation
+const slimeReady = () => SLIME.complete && SLIME.naturalWidth > 0; // sinon, l’ancien dessin reste utilisé
+function drawSlime(e, face) { // le contexte est déjà centré sur l’ennemi
+  const n = Math.floor(g.t * SLIME_FPS + e.ph) % 6, size = 64 * SLIME_SCALE;
+  ctx.imageSmoothingEnabled = false; // garde les pixels nets
+  ctx.save(); ctx.scale(face, 1); // l’image regarde vers la droite : on la retourne quand le monstre va à gauche
+  ctx.drawImage(SLIME, n * 64, 0, 64, 64, -size / 2, e.r - size, size, size);
+  ctx.restore();
 }
 function sprite(e) {
   const r = e.r, f = Math.sin(g.t * 8 + e.ph), face = g.p.x < e.x ? -1 : 1;
@@ -370,7 +416,9 @@ function sprite(e) {
     ctx.fillStyle = "#4e2a78"; ctx.fillRect(-r * 1.3, -r * 0.3 + f * 2, r * 0.4, r * 1.1); ctx.fillRect(r * 0.9, -r * 0.3 - f * 2, r * 0.4, r * 1.1);
     ctx.fillStyle = "#6e3fa0"; ctx.beginPath(); ctx.roundRect(-r, -r, r * 2, r * 2, r * 0.45); ctx.fill();
     eyes(r * 0.4, -r * 0.25, r * 0.14, "#ff5a5a");
-  } else { // fantôme
+  } else if (slimeReady()) { // monstre de base : slime bleu
+    drawSlime(e, face);
+  } else { // fantôme (secours si l’image est absente)
     ctx.fillStyle = "#eadcf0"; ctx.beginPath(); ctx.arc(0, -r * 0.1, r, Math.PI, 0); ctx.lineTo(r, r);
     for (let i = 0; i < 3; i++) ctx.quadraticCurveTo(r - (i * 2 + 1) * r / 3, r * (1.5 + f * 0.3), r - (i + 1) * r * 2 / 3, r);
     ctx.closePath(); ctx.fill();
@@ -435,6 +483,26 @@ function draw() {
 
   ctx.save(); ctx.translate(-cx, -cy);
   decor(cx, cy);
+  ctx.fillStyle = "rgba(8,6,12,.78)"; ctx.beginPath(); ctx.rect(-5000, -5000, 10000, 10000); ctx.arc(0, 0, HALF, 0, 6.283, true); ctx.fill(); // hors de la carte
+  ctx.strokeStyle = "#8a3a4a"; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(0, 0, HALF, 0, 6.283); ctx.stroke();
+  { // zone de sortie
+    const pulse = 0.5 + 0.5 * Math.sin(g.t * 3);
+    ctx.fillStyle = "rgba(255,211,107," + (0.10 + 0.08 * pulse) + ")"; ctx.beginPath(); ctx.arc(0, 0, 55, 0, 6.283); ctx.fill();
+    ctx.strokeStyle = "#ffd36b"; ctx.lineWidth = 3; ctx.setLineDash([8, 6]); ctx.beginPath(); ctx.arc(0, 0, 55, 0, 6.283); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = "#ffd36b"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center"; ctx.fillText("SORTIE", 0, 4);
+    if (g.exitT > 0) { ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(0, 0, 64, -Math.PI / 2, -Math.PI / 2 + 6.283 * g.exitT / 2); ctx.stroke(); }
+  }
+  for (const n of g.nodes) { // gisements d’éclats : plus loin de la sortie = plus riches
+    const b = Math.sin(g.t * 2 + n.ph) * 2;
+    ctx.fillStyle = "rgba(120,200,255,.2)"; ctx.beginPath(); ctx.arc(n.x, n.y, 22, 0, 6.283); ctx.fill();
+    for (const [dx, dy, k] of [[-8, 4, 0.7], [8, 5, 0.6], [0, 0, 1]]) {
+      ctx.fillStyle = "#8fe3ff"; ctx.beginPath(); ctx.moveTo(n.x + dx, n.y + dy - 14 * k + b); ctx.lineTo(n.x + dx + 7 * k, n.y + dy + b);
+      ctx.lineTo(n.x + dx, n.y + dy + 10 * k + b); ctx.lineTo(n.x + dx - 7 * k, n.y + dy + b); ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = "#f0eaf7"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("x" + n.v, n.x, n.y + 28);
+    if (n.prog > 0) { ctx.strokeStyle = "#ffe27a"; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(n.x, n.y, 26, -Math.PI / 2, -Math.PI / 2 + 6.283 * n.prog / 1.2); ctx.stroke(); }
+  }
+  for (const k of g.packs) { ctx.fillStyle = "#6b5a2a"; ctx.fillRect(k.x - 8, k.y - 6, 16, 12); ctx.fillStyle = "#ffe27a"; ctx.fillRect(k.x - 8, k.y - 6, 16, 3); ctx.fillRect(k.x - 2, k.y - 2, 4, 5); } // munitions
   for (const s of g.shards) { // éclats de lune
     const b = Math.sin(g.t * 3 + s.ph) * 3;
     ctx.fillStyle = s.f ? "rgba(255,90,90,.28)" : "rgba(120,200,255,.25)"; ctx.beginPath(); ctx.arc(s.x, s.y + b, 16, 0, 6.283); ctx.fill();
@@ -452,7 +520,7 @@ function draw() {
     ctx.fillStyle = "rgba(255,120,40," + 0.22 * fl + ")"; ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 6.283); ctx.fill();
     ctx.fillStyle = "rgba(255,200,80," + 0.25 * fl + ")"; ctx.beginPath(); ctx.arc(f.x, f.y, f.r * 0.55, 0, 6.283); ctx.fill();
   }
-  for (const e of g.enemies) sprite(e);
+  for (const e of g.enemies) if (Math.abs(e.x - p.x) < W / 2 + 70 && Math.abs(e.y - p.y) < H / 2 + 70) sprite(e);
   for (const z of g.zones) { // zone magique : le disque se remplit avant l’explosion
     const k = 1 - z.t / 0.4;
     ctx.fillStyle = "rgba(184,138,240,.25)"; ctx.beginPath(); ctx.arc(z.x, z.y, z.r * k, 0, 6.283); ctx.fill();
@@ -480,8 +548,8 @@ function draw() {
   ctx.fillStyle = "#e05a5a"; ctx.fillRect(12, 18, 140 * Math.max(0, p.hp) / p.max, 12);
   ctx.fillStyle = "#f0eaf7"; ctx.font = "14px sans-serif"; ctx.textAlign = "left";
   ctx.fillText((g.xpOn ? "Niv. " + p.lvl + "   " : "") + "Victimes : " + g.kills, 12, 48);
-  ctx.fillStyle = "#8fe3ff"; ctx.fillText("Éclats : " + g.run + " (réserve " + bank + ")", 12, 66); ctx.fillStyle = "#f0eaf7";
-  if (frag) { ctx.fillStyle = "#ff7a7a"; ctx.fillText("Fragments de boss : " + frag, 12, 84); ctx.fillStyle = "#f0eaf7"; }
+  ctx.fillStyle = "#8fe3ff"; ctx.fillText("Butin : " + g.run + " éclats" + (g.runF ? " · " + g.runF + " fragment" + (g.runF > 1 ? "s" : "") : "") + (g.found.length ? " · " + g.found.length + " équip." : ""), 12, 66); ctx.fillStyle = "#f0eaf7";
+  ctx.fillStyle = g.ammo > 0 ? "#ffe27a" : "#ff6a6a"; ctx.fillText("Munitions : " + g.ammo + (g.ammo > 0 ? "" : " (coups de poing)"), 12, 84); ctx.fillStyle = "#f0eaf7";
   ctx.textAlign = "right"; ctx.fillText(fmt(g.t), W - 12, 30);
   if (g.dashOn) { // bouton de dash (aussi : Espace ou Maj)
     const bx = W - 50, by = H - 50, ready = g.dashCdT <= 0, k = ready ? 1 : 1 - g.dashCdT / g.dashCd;
@@ -490,13 +558,16 @@ function draw() {
     ctx.fillStyle = "#f0eaf7"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.fillText("DASH", bx, by + 4);
   }
   if (g.msgT > 0) { ctx.textAlign = "center"; ctx.fillStyle = g.msgC || "#ff6a6a"; ctx.font = "bold 22px sans-serif"; ctx.fillText(g.msg, W / 2, 90); }
-  let ns = null, nd = 1e9; // flèche vers l’éclat le plus proche s’il est hors écran
-  for (const s of g.shards) { const d = Math.hypot(s.x - p.x, s.y - p.y); if (d < nd) { nd = d; ns = s; } }
-  if (ns && (Math.abs(ns.x - p.x) > W / 2 - 10 || Math.abs(ns.y - p.y) > H / 2 - 10)) {
-    const a = Math.atan2(ns.y - p.y, ns.x - p.x), m = Math.min(W, H) * 0.4;
-    ctx.save(); ctx.translate(W / 2 + Math.cos(a) * m, H / 2 + Math.sin(a) * m); ctx.rotate(a);
-    ctx.fillStyle = "#8fe3ff"; ctx.beginPath(); ctx.moveTo(10, 0); ctx.lineTo(-6, -7); ctx.lineTo(-6, 7); ctx.fill(); ctx.restore();
+  const dEx = Math.hypot(p.x, p.y); // flèche vers la sortie, toujours visible autour du héros
+  if (dEx > 70) {
+    const a = Math.atan2(-p.y, -p.x), ax = W / 2 + Math.cos(a) * 58, ay = H / 2 + Math.sin(a) * 58;
+    ctx.save(); ctx.translate(ax, ay); ctx.rotate(a);
+    ctx.fillStyle = "#ffd36b"; ctx.strokeStyle = "#14101c"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(13, 0); ctx.lineTo(-7, -10); ctx.lineTo(-3, 0); ctx.lineTo(-7, 10); ctx.closePath(); ctx.stroke(); ctx.fill(); ctx.restore();
+    ctx.fillStyle = "#ffd36b"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("Sortie " + Math.round(dEx / 10) + " m", ax, ay + (Math.sin(a) > 0 ? 24 : -16));
   }
+  if (g.exitT > 0) { ctx.textAlign = "center"; ctx.fillStyle = "#ffd36b"; ctx.font = "bold 18px sans-serif"; ctx.fillText("Évacuation… " + (2 - g.exitT).toFixed(1) + " s", W / 2, 120); }
   if (stick) {
     ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(stick.ox, stick.oy, 50, 0, 6.283); ctx.stroke();
@@ -508,8 +579,8 @@ const fmt = t => String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(Math
 // ====== Écrans (menu, niveau, fin) ======
 function show(html) { ov.innerHTML = '<div class="card">' + html + "</div>"; ov.hidden = false; }
 function showMenu() {
-  show("<h1>Veillée</h1><p>Joueur : <b>" + esc(meName) + "</b>" + (stats.parties ? " – " + stats.parties + " parties, record " + fmt(stats.meilleurTemps) + ", niveau " + stats.meilleurNiveau : "") + "</p><p>Survis à la nuit. Ton personnage tire tout seul : toi, tu t’occupes de bouger.</p>" +
-    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>. Ramasse ceux qui apparaissent sur la carte.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : "") + " <button id='who' class='alt'>Changer de joueur</button>" + (TEST_MODE ? " <button id='test' class='alt'>Outils de test</button>" : "")); // TEST
+  show("<h1>Veillée</h1><p>Joueur : <b>" + esc(meName) + "</b>" + (stats.parties ? " – " + stats.parties + " parties, record " + fmt(stats.meilleurTemps) + ", niveau " + stats.meilleurNiveau : "") + "</p><p>Explore la carte, récolte des éclats de lune, puis reviens à la sortie sans mourir. Si tu tombes, tu perds ton butin et ton équipement porté. Ton personnage attaque tout seul, mais tes munitions sont limitées.</p>" +
+    "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : "") + " <button id='who' class='alt'>Changer de joueur</button>" + (TEST_MODE ? " <button id='test' class='alt'>Outils de test</button>" : "")); // TEST
   document.getElementById("go").onclick = play;
   document.getElementById("who").onclick = showProfiles;
   if (TEST_MODE) document.getElementById("test").onclick = showTestTools; // TEST
@@ -581,6 +652,9 @@ async function startGame(cls) {
     }
   }
   g.p.hp = g.p.max;
+  g.ammo = { guerrier: 90, archer: 140, mage: 100 }[g.cls] || 120; // munitions de départ selon la classe
+  genWorld();
+  g.msg = "Récolte des éclats, puis reviens à la sortie !"; g.msgC = "#ffd36b"; g.msgT = 5;
 }
 
 // ====== Écrans de niveau et de fin de partie ======
@@ -597,10 +671,14 @@ function showLevelUp() {
   }
 }
 function showOver() {
-  show("<h2>Tu es tombé</h2><p>Tu as tenu " + fmt(g.t) + (g.xpOn ? ", niveau " + g.p.lvl : "") + ", avec " + g.kills + " victimes.</p><p>Éclats de lune ramassés : <b>" + g.run + "</b> (réserve : " + bank + ")</p>" +
-    (g.runF ? "<p>Fragments de boss : <b>" + g.runF + "</b> (total : " + frag + ")</p>" : "") +
-    (g.lootOn ? "<p>Équipements trouvés : " + (g.found.length ? g.found.map(it => RAR[it.r].n.toLowerCase() + " (" + it.name + ")").join(", ") : "aucun") + ".</p>" : "") +
-    "<button id='again'>Rejouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : ""));
+  const ok = g.ok, names = g.found.map(it => RAR[it.r].n.toLowerCase() + " (" + it.name + ")").join(", ");
+  show("<h2>" + (ok ? "Évacuation réussie !" : "Tu es tombé…") + "</h2><p>" + (ok ? "Tu rentres au camp avec ton butin." : "Tu perds tout ton butin et ton équipement porté.") +
+    " Durée : " + fmt(g.t) + (g.xpOn ? ", niveau " + g.p.lvl : "") + ", " + g.kills + " victimes.</p>" +
+    "<p>Éclats de lune : <b>" + g.run + "</b>" + (ok ? " (réserve : " + bank + ")" : " perdus") +
+    (g.runF ? "<br>Fragments de boss : <b>" + g.runF + "</b>" + (ok ? " (total : " + frag + ")" : " perdus") : "") + "</p>" +
+    (g.lootOn ? "<p>Équipements trouvés : " + (g.found.length ? names + (ok ? "" : " (perdus)") : "aucun") + ".</p>" : "") +
+    (!ok && g.lost.length ? "<p>Équipement perdu : " + g.lost.map(it => it.data.name).join(", ") + ".</p>" : "") +
+    "<button id='again'>Repartir</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : ""));
   document.getElementById("again").onclick = play;
   document.getElementById("town").onclick = showTown;
   if (has("armurerie")) document.getElementById("eq").onclick = showEquip;
