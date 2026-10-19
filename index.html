@@ -199,16 +199,16 @@ function newGame() {
   g = { state: "menu", t: 0, kills: 0, spawn: 0, cd: 0, ang: 0,
     p: { x: 0, y: 0, r: 12, hp: 100, max: 100, speed: 150, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
     w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0, mode: "proj", radius: 70 },
-    enemies: [], shots: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, ammo: 0, nodes: [], packs: [], ok: false, left: false, exitT: 0, lost: [], lv: LEVELS.foret, lvKey: "foret", unlockedNow: false, graves: [], gravePoll: 8, graveT: 0, graveId: 0, looting: false, tomb: false, msg: "", msgT: 0 };
+    enemies: [], shots: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], eshots: [], rings: [], pks: [], ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, ammo: 0, nodes: [], packs: [], ok: false, left: false, exitT: 0, lost: [], lv: LEVELS.foret, lvKey: "foret", unlockedNow: false, graves: [], gravePoll: 8, graveT: 0, graveId: 0, looting: false, tomb: false, msg: "", msgT: 0 };
 }
 
 // Un niveau = décor, quantité de ressources et de monstres, force des monstres (hp, dmg), part de monstres d’élite (elite).
 const LEVELS = {
-  foret: { n: "Forêt", bg: "#14211a", grid: "#1c2d23", nodes: 16, packs: 7, enemies: 110, bosses: [[650, 850], [950, 1200]], hp: 1, dmg: 1, elite: 0, nodeBonus: 0, charge: true, loot: { mob: [[0, 1]], boss: [[4, 1]] }, drop: 0.012,
-    d: "Des arbres épais cachent les monstres et les gisements. Peu de ressources, mais des monstres plus faibles. Vaincre un boss de la forêt ouvre la ville. Seuls des équipements communs y tombent, et les boss en lâchent des peu communs." },
+  foret: { n: "Forêt", bg: "#14211a", grid: "#1c2d23", nodes: 16, packs: 7, enemies: 60, meutes: 22, bosses: [[650, 850], [950, 1200, "garruk"]], hp: 1, dmg: 1, elite: 0, nodeBonus: 0, charge: true, loot: { mob: [[0, 1]], boss: [[4, 1]] }, drop: 0.012,
+    d: "Des arbres épais cachent les monstres et les gisements. Peu de ressources, mais des monstres plus faibles : des meutes de 3 loups rôdent entre les arbres, et Garruk règne sur la forêt. Vaincre un boss de la forêt ouvre la ville. Seuls des équipements communs y tombent, et les boss en lâchent des peu communs." },
   ville: { n: "Ville en ruines", lock: "lvl_ville", hint: "Vaincs un boss de la forêt pour débloquer ce niveau.", bg: "#1a1c26", grid: "#242738", nodes: 55, packs: 11, enemies: 230,
-    bosses: [[600, 800], [850, 1000], [1050, 1220]], hp: 1.5, dmg: 1.4, elite: 0.12, nodeBonus: 1, loot: { mob: [[0, 70], [4, 30]], boss: [[4, 1]] }, drop: 0.014,
-    d: "Des rues en ruines, beaucoup de ressources, mais des monstres bien plus nombreux et plus forts. Ils peuvent lâcher des équipements communs et peu communs." }
+    bosses: [[600, 800], [850, 1000], [1050, 1220, "karn"]], tireurs: 0.2, hp: 1.5, dmg: 1.4, elite: 0.12, nodeBonus: 1, loot: { mob: [[0, 70], [4, 30]], boss: [[4, 1]] }, drop: 0.014,
+    d: "Des rues en ruines, beaucoup de ressources, mais des monstres bien plus nombreux et plus forts, dont des tireurs fragiles qui gardent leurs distances. Karn règne sur la ville. Les monstres peuvent lâcher des équipements communs et peu communs." }
 };
 const HALF = 1300; // rayon de la carte ; la sortie est au centre, là où l’on commence
 // ====== Obstacles : murs des ruines (ville) et troncs d’arbres (forêt) ======
@@ -254,26 +254,72 @@ function moveBy(o, dx, dy, r) { // déplace o en glissant le long des obstacles 
   if (!blocked(o.x + dx, o.y, r)) o.x += dx;
   if (!blocked(o.x, o.y + dy, r)) o.y += dy;
 }
-function bossCharge(e, dx, dy, d, dt) { // boss qui charge : poursuite, visée (1 s, couloir rouge), charge en ligne droite, repos
+const BOSSES = { // boss nommés : Garruk règne sur la forêt, Karn sur la ville
+  garruk: { name: "Garruk", r: 38, hpMul: 1, sp: 54, skin: "garruk", howl: true }, // charge, hurlement qui appelle des meutes, rage sous 40 % de vie
+  karn: { name: "Karn", r: 36, hpMul: 0.8, sp: 44, skin: "karn", armor: 0.35 } // blindé, salves en éventail, onde de choc
+};
+function spawnPack(x, y, aggro) { // meute de 3 loups (forêt) : faibles et rapides, ils patrouillent et s’alertent ensemble
+  const R = HALF - 40, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
+  for (let k = 0; k < 10 && blocked(x, y, 30); k++) { x += (Math.random() - 0.5) * 80; y += (Math.random() - 0.5) * 80; }
+  const sc = (1 + Math.hypot(x, y) / 900 + g.t / 240) * g.lv.hp;
+  const pk = { home: { x, y }, tx: x, ty: y, wanderT: Math.random() * 3, alert: !!aggro, members: [] };
+  for (const [ox, oy] of [[-20, -8], [20, -8], [0, 16]]) {
+    const e = { x: x + ox, y: y + oy, r: 8, hp: 8 * sc, sp: 95 * (0.95 + Math.random() * 0.1), c: "#6f7480", oc: 0, k: 4, ph: Math.random() * 6, aggro: !!aggro, pack: pk, off: [ox, oy], dmg: 0.6 };
+    pk.members.push(e); g.enemies.push(e);
+  }
+  g.pks.push(pk);
+}
+function fireAt(x, y, ang, speed, dmg, c) { g.eshots.push({ x, y, vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed, life: 4, dmg, c }); } // projectile ennemi
+function shooterAI(e, dx, dy, d, dt) { // tireur (ville) : fragile, garde ses distances et tire des projectiles lents (le dash les traverse)
+  const R = e.r * 0.8, sp = e.sp;
+  if (d < 170) moveBy(e, -dx / d * sp * 1.3 * dt, -dy / d * sp * 1.3 * dt, R); // recule si on s’approche
+  else if (d > 320) moveBy(e, dx / d * sp * dt, dy / d * sp * dt, R);
+  else { const s = e.ph > 3 ? 1 : -1; moveBy(e, -dy / d * s * sp * 0.6 * dt, dx / d * s * sp * 0.6 * dt, R); } // tourne autour du joueur
+  e.volT -= dt;
+  if (e.volT <= 0 && d < 430 && lineClear(e.x, e.y, g.p.x, g.p.y)) { e.volT = 2.2 + Math.random() * 0.8; fireAt(e.x, e.y, Math.atan2(dy, dx), 190, 7); }
+}
+function bossKarn(e, dx, dy, d, dt) { // Karn : blindé (−35 % de dégâts), salves en éventail, onde de choc au sol
   const R = e.r * 0.8;
-  e.stT -= dt;
+  if (e.st === "slam") { e.stT -= dt; if (e.stT <= 0) e.st = "chase"; return; } // figé pendant la préparation de l’onde de choc
+  e.volT -= dt; e.slamT -= dt;
+  if (d > 200) moveBy(e, dx / d * e.sp * dt, dy / d * e.sp * dt, R);
+  else if (d < 130) moveBy(e, -dx / d * e.sp * 0.7 * dt, -dy / d * e.sp * 0.7 * dt, R);
+  if (e.slamT <= 0 && d < 400) { e.slamT = 9; e.st = "slam"; e.stT = 0.9; g.rings.push({ x: e.x, y: e.y, r: 135, T: 0.9, t: 0.9, dmg: 26 }); g.msg = "Karn frappe le sol !"; g.msgC = "#ff8a5a"; g.msgT = 2; }
+  else if (e.volT <= 0 && d < 540 && lineClear(e.x, e.y, g.p.x, g.p.y)) { e.volT = 3; const a = Math.atan2(dy, dx); for (let i = -2; i <= 2; i++) fireAt(e.x, e.y, a + i * 0.2, 210, 9, "#ffb36b"); }
+}
+function bossCharge(e, dx, dy, d, dt) { // cycle : poursuite, hurlement (Garruk), visée (1 s, couloir rouge), charge en ligne droite, repos
+  const R = e.r * 0.8, rage = e.howl && e.hp < e.max * 0.4, sp = e.sp * (rage ? 1.3 : 1);
+  e.stT -= dt; if (e.howl) e.howlT -= dt;
   if (e.st === "chase") {
-    moveBy(e, dx / d * e.sp * dt, dy / d * e.sp * dt, R);
-    if (e.stT <= 0) { if (d > 140 && d < 560) { e.st = "wind"; e.stT = 1; } else e.stT = 1.5; }
+    moveBy(e, dx / d * sp * dt, dy / d * sp * dt, R);
+    if (e.howl && e.howlT <= 0 && g.enemies.length < 280) { e.st = "howl"; e.stT = 0.9; g.msg = e.name + " hurle !"; g.msgC = "#9be37a"; g.msgT = 2; }
+    else if (e.stT <= 0) { if (d > 140 && d < 560) { e.st = "wind"; e.stT = 1; } else e.stT = 1.5; }
+  } else if (e.st === "howl") { // appel de la meute : cercles verts, puis 3 loups (6 en rage)
+    if (Math.floor(e.stT * 6) !== Math.floor((e.stT + dt) * 6)) g.fx.push({ x: e.x, y: e.y, r: 60 + (0.9 - e.stT) * 110, t: 0.25, c: "#9be37a" });
+    if (e.stT <= 0) { spawnPack(e.x + 70, e.y + 40, true); if (rage) spawnPack(e.x - 70, e.y - 40, true); e.howlT = rage ? 7 : 11; e.st = "chase"; e.stT = 2; }
   } else if (e.st === "wind") {
     if (e.stT > 0.35) { e.cx = dx / d; e.cy = dy / d; } // il suit le joueur, puis la direction est verrouillée : c’est le moment d’esquiver
     if (e.stT <= 0) { e.st = "charge"; e.stT = 0.6; }
   } else if (e.st === "charge") {
-    const step = 420 * dt, x0 = e.x, y0 = e.y;
+    const step = 420 * (rage ? 1.15 : 1) * dt, x0 = e.x, y0 = e.y;
     moveBy(e, e.cx * step, e.cy * step, R);
     if (Math.hypot(e.x - x0, e.y - y0) < step * 0.5 || e.stT <= 0) { e.st = "rest"; e.stT = 0.8; } // un obstacle l’arrête : il est étourdi
-  } else if (e.stT <= 0) { e.st = "chase"; e.stT = 4 + Math.random() * 4; }
+  } else if (e.stT <= 0) { e.st = "chase"; e.stT = (rage ? 2 : 4) + Math.random() * (rage ? 2 : 4); }
 }
 function spawnAt(x, y, aggro, boss) { // plus on s’éloigne de la sortie, plus les monstres sont nombreux et solides
   const L = g.lv, R = HALF - 20, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
   for (let k = 0; k < 10 && blocked(x, y, 16); k++) { x += (Math.random() - 0.5) * 80; y += (Math.random() - 0.5) * 80; } // pas dans un mur
   const d = Math.hypot(x, y), r = Math.random() - L.elite, sc = (1 + d / 900 + g.t / 240) * L.hp;
-  if (boss) { const hp = 450 * sc, e = { x, y, r: 34, hp, max: hp, sp: 52, oc: 0, k: 3, boss: true, ph: 0, aggro: !!aggro, st: "chase", stT: 4 + Math.random() * 4, cx: 0, cy: 0 }; g.enemies.push(e); return e; }
+  if (boss) { // boss ordinaire, ou boss nommé (BOSSES) avec ses pouvoirs
+    const B = BOSSES[boss] || {}, hp = 450 * sc * (B.hpMul || 1);
+    const e = { x, y, r: B.r || 34, hp, max: hp, sp: B.sp || 52, oc: 0, k: 3, boss: true, ph: 0, aggro: !!aggro, st: "chase", stT: 4 + Math.random() * 4, cx: 0, cy: 0,
+      name: B.name, skin: B.skin, howl: !!B.howl, howlT: 8, armor: B.armor || 0, volT: 2, slamT: 6 };
+    g.enemies.push(e); return e;
+  }
+  if (Math.random() < (L.tireurs || 0)) { // tireur (ville) : fragile, tire de loin
+    const e = { x, y, r: 9, hp: 9 * sc, sp: 42, c: "#ff6ac8", oc: 0, k: 5, ph: Math.random() * 6, aggro: !!aggro, volT: 0.5 + Math.random() * 1.5 };
+    g.enemies.push(e); return e;
+  }
   const type = d > 900 ? (r < 0.3 ? 2 : r < 0.6 ? 1 : 0) : d > 550 ? (r < 0.12 ? 2 : r < 0.4 ? 1 : 0) : (r < 0.2 ? 1 : 0);
   const T = [{ r: 10, hp: 15, sp: 60, c: "#e05a5a" }, { r: 8, hp: 9, sp: 115, c: "#e8a838" }, { r: 18, hp: 70, sp: 42, c: "#a35ae0" }][type];
   const e = { x, y, r: T.r, hp: T.hp * sc, sp: T.sp * (0.9 + Math.random() * 0.2), c: T.c, oc: 0, k: type, ph: Math.random() * 6, aggro: !!aggro };
@@ -285,7 +331,8 @@ function genWorld() { // remplit la carte selon le niveau : gisements, caisses d
   for (let i = 0; i < L.nodes; i++) { const q = pos(180, 1250); g.nodes.push({ x: q.x, y: q.y, v: 1 + Math.floor(Math.hypot(q.x, q.y) / 350) + (Math.random() < 0.3 ? 1 : 0) + L.nodeBonus, prog: 0, ph: Math.random() * 6 }); }
   for (let i = 0; i < L.packs; i++) { const q = pos(150, 1250); g.packs.push({ x: q.x, y: q.y, v: 15 }); }
   for (let i = 0; i < L.enemies; i++) { const q = pos(300, 1250); spawnAt(q.x, q.y, false); }
-  for (const [a, b] of L.bosses) { const q = pos(a, b, 30); spawnAt(q.x, q.y, false, true); }
+  for (let i = 0; i < (L.meutes || 0); i++) { const q = pos(300, 1250, 30); spawnPack(q.x, q.y, false); } // meutes de loups (forêt)
+  for (const [a, b, who] of L.bosses) { const q = pos(a, b, 30); spawnAt(q.x, q.y, false, who || true); }
 }
 
 // ====== Mise à jour (appelée à chaque image) ======
@@ -308,7 +355,7 @@ async function lootGrave(gr) { // la tombe disparaît pour tous ; son propriéta
   cur.msgT = 4;
 }
 function dealDamage(e, d) { // tous les dégâts du joueur passent ici (vol de vie du guerrier)
-  e.aggro = true; const real = Math.min(d, Math.max(0, e.hp)); e.hp -= d;
+  e.aggro = true; e.hurt = true; if (e.armor) d *= 1 - e.armor; const real = Math.min(d, Math.max(0, e.hp)); e.hp -= d;
   if (g.ls) g.p.hp = Math.min(g.p.max, g.p.hp + real * g.ls);
 }
 function explode(x, y, src) { // flèches explosives de l’archer
@@ -353,7 +400,8 @@ function update(dt) {
   if (g.t > 150 && g.spawn <= 0 && g.enemies.length < 260) {
     g.spawn = Math.max(1.5, 9 - (g.t - 150) / 40);
     const a = Math.random() * 6.283, d = Math.max(W, H) / 2 + 40;
-    spawnAt(p.x + Math.cos(a) * d, p.y + Math.sin(a) * d, true);
+    if (g.lv.meutes && Math.random() < 0.5) spawnPack(p.x + Math.cos(a) * d, p.y + Math.sin(a) * d, true); // renforts : parfois une meute
+    else spawnAt(p.x + Math.cos(a) * d, p.y + Math.sin(a) * d, true);
   }
   g.msgT -= dt;
   for (const s of g.shards) if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + 14 + (p.mag - 80)) { s.got = true; if (s.f) { g.runF++; g.msg = "Fragment de boss !"; g.msgC = "#ff7a7a"; g.msgT = 2; } else g.run++; }
@@ -451,25 +499,59 @@ function update(dt) {
     for (const e of g.enemies) if (e.oc <= 0 && Math.hypot(e.x - ox, e.y - oy) < e.r + 9) { dealDamage(e, w.orbDmg); e.oc = 0.4; }
   }
 
+  // Meutes de loups : un loup repéré ou blessé alerte toute la meute ; sans alerte, elle patrouille ensemble
+  for (const pk of g.pks) {
+    const ms = pk.members.filter(m => m.hp > 0); if (!ms.length) continue;
+    const dist = m => Math.hypot(p.x - m.x, p.y - m.y);
+    if (ms.some(m => dist(m) < 260 || m.hurt)) pk.alert = true; else if (ms.every(m => dist(m) > 650)) pk.alert = false;
+    for (const m of ms) m.aggro = pk.alert;
+    if (!pk.alert) {
+      pk.wanderT -= dt;
+      if (pk.wanderT <= 0) { pk.wanderT = 3 + Math.random() * 3; const a = Math.random() * 6.283, dd = Math.random() * 110; pk.tx = pk.home.x + Math.cos(a) * dd; pk.ty = pk.home.y + Math.sin(a) * dd; }
+    }
+  }
+  g.pks = g.pks.filter(pk => pk.members.some(m => m.hp > 0));
   // Ennemis : immobiles jusqu’à ce qu’ils te repèrent, puis ils te poursuivent (ils perdent ta trace si tu t’éloignes)
   for (const e of g.enemies) {
     e.oc -= dt;
     const dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy) || 1;
-    if (!e.aggro && d < (e.boss ? 380 : 260)) e.aggro = true;
+    if (e.pack) { /* l’alerte est gérée par la meute */ }
+    else if (!e.aggro && d < (e.boss || e.k === 5 ? 380 : 260)) e.aggro = true;
     else if (e.aggro && d > (e.boss ? 900 : 650)) { e.aggro = false; if (e.boss) { e.st = "chase"; e.stT = 4; } }
+    if (e.aggro && e.name && !e.seen) { e.seen = true; g.msg = e.name + " t’a repéré !"; g.msgC = "#ff7a7a"; g.msgT = 3; }
     if (e.aggro) {
-      if (e.boss && g.lv.charge) bossCharge(e, dx, dy, d, dt); // les boss de ce niveau chargent de temps en temps
+      if (e.name === "Karn") bossKarn(e, dx, dy, d, dt);
+      else if (e.boss && g.lv.charge) bossCharge(e, dx, dy, d, dt); // les boss de ce niveau chargent de temps en temps
+      else if (e.k === 5) shooterAI(e, dx, dy, d, dt);
       else moveBy(e, dx / d * e.sp * dt, dy / d * e.sp * dt, e.r * 0.8); // les murs et les troncs bloquent les monstres
+    } else if (e.pack) { // patrouille de la meute
+      const pk = e.pack, tx = pk.tx + e.off[0] - e.x, ty = pk.ty + e.off[1] - e.y, td = Math.hypot(tx, ty);
+      if (td > 6) moveBy(e, tx / td * e.sp * 0.45 * dt, ty / td * e.sp * 0.45 * dt, e.r * 0.8);
     }
-    if (d < e.r + p.r && p.inv <= 0) { p.hp -= ((e.boss ? 18 : 8) + g.t / 60) * g.lv.dmg * (e.st === "charge" ? 1.8 : 1); p.inv = 0.5; g.exitT = 0; g.graveT = 0; }
+    if (d < e.r + p.r && p.inv <= 0) { p.hp -= ((e.boss ? 18 : 8) + g.t / 60) * g.lv.dmg * (e.st === "charge" ? 1.8 : 1) * (e.dmg || 1); p.inv = 0.5; g.exitT = 0; g.graveT = 0; }
   }
+  for (const q of g.eshots) { // projectiles ennemis : arrêtés par les murs, ils traversent le joueur pendant un dash
+    q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt;
+    if (blocked(q.x, q.y, 3)) { q.life = 0; continue; }
+    if (p.inv <= 0 && Math.hypot(q.x - p.x, q.y - p.y) < p.r + 4) { p.hp -= (q.dmg + g.t / 90) * g.lv.dmg; p.inv = 0.5; g.exitT = 0; g.graveT = 0; q.life = 0; }
+  }
+  g.eshots = g.eshots.filter(q => q.life > 0);
+  for (const rg of g.rings) { // onde de choc de Karn : dégâts si tu es encore dans la zone à la fin (le dash l’évite)
+    rg.t -= dt;
+    if (rg.t <= 0) {
+      rg.done = true; g.fx.push({ x: rg.x, y: rg.y, r: rg.r, t: 0.3, c: "#ff8a5a" });
+      if (Math.hypot(p.x - rg.x, p.y - rg.y) < rg.r + p.r && p.inv <= 0) { p.hp -= (rg.dmg + g.t / 60) * g.lv.dmg; p.inv = 0.5; g.exitT = 0; g.graveT = 0; }
+    }
+  }
+  g.rings = g.rings.filter(rg => !rg.done);
   // Mort des ennemis : butin, munitions et équipements
   for (const e of g.enemies) if (e.hp <= 0) {
     g.kills++;
     if (e.boss) for (let i = 0; i < 3; i++) g.shards.push({ x: e.x + (i - 1) * 24, y: e.y, ph: i });
     if (e.boss) g.shards.push({ x: e.x, y: e.y + 28, ph: 1, f: true }); // fragment de boss
+    if (e.name) { g.msg = e.name + " est vaincu !"; g.msgC = "#ffd36b"; g.msgT = 4; }
     if (e.boss && g.lvKey === "foret" && !town.lvl_ville) { // boss de la forêt vaincu : la ville est débloquée
-      town.lvl_ville = 1; g.unlockedNow = true; saveRemote(true); g.msg = "Niveau débloqué : la ville !"; g.msgC = "#ffd36b"; g.msgT = 5;
+      town.lvl_ville = 1; g.unlockedNow = true; saveRemote(true); g.msg = (e.name ? e.name + " est vaincu ! " : "") + "Niveau débloqué : la ville !"; g.msgC = "#ffd36b"; g.msgT = 5;
     }
     if (Math.random() < 0.10) g.packs.push({ x: e.x, y: e.y - 8, v: 4 }); // petite réserve de munitions
     if (g.lootOn && (e.boss || Math.random() < g.lv.drop)) g.loot.push({ x: e.x, y: e.y + 10, it: rollItem(!!e.boss), ph: Math.random() * 6 });
@@ -502,6 +584,8 @@ function sprite(e) {
   ctx.save(); ctx.translate(e.x, e.y);
   ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(0, r * 0.9, r * 0.9, r * 0.35, 0, 0, 6.283); ctx.fill();
   if (e.boss) drawBoss(e, f, face);
+  else if (e.k === 4) drawWolf(e, f, face);
+  else if (e.k === 5) drawShooter(e, f, face);
   else if (e.k === 1) { // chauve-souris
     ctx.fillStyle = "#4b3a66";
     ctx.beginPath(); ctx.ellipse(0, 0, r * 0.6, r * 0.7, 0, 0, 6.283); ctx.fill();
@@ -521,21 +605,51 @@ function sprite(e) {
   }
   ctx.restore();
 }
+function drawWolf(e, f, face) { // loup de la forêt : petit, rapide, en meute
+  const r = e.r; ctx.save(); ctx.scale(face, 1);
+  ctx.fillStyle = "#6f7480"; ctx.beginPath(); ctx.ellipse(-1, 0, r * 1.2, r * 0.7, 0, 0, 6.283); ctx.fill();
+  ctx.fillStyle = "#5a5f6b"; ctx.fillRect(-r * 0.8, r * 0.4 + f * 1.5, 3, r * 0.6); ctx.fillRect(r * 0.4, r * 0.4 - f * 1.5, 3, r * 0.6);
+  ctx.fillStyle = "#838995"; ctx.beginPath(); ctx.arc(r * 1.1, -r * 0.35, r * 0.55, 0, 6.283); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(r * 1.35, -r * 0.55); ctx.lineTo(r * 1.7, -r * 0.2); ctx.lineTo(r * 1.35, -r * 0.1); ctx.fill();
+  ctx.fillStyle = "#5a5f6b"; ctx.beginPath(); ctx.moveTo(r * 0.8, -r * 0.8); ctx.lineTo(r * 1.0, -r * 1.35); ctx.lineTo(r * 1.15, -r * 0.8); ctx.fill();
+  ctx.strokeStyle = "#6f7480"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(-r * 1.1, -r * 0.1); ctx.quadraticCurveTo(-r * 1.8, -r * 0.5 + f * 2, -r * 1.7, -r * 1.0); ctx.stroke();
+  ctx.fillStyle = "#ffcf5a"; ctx.fillRect(r * 1.15, -r * 0.5, 2, 2);
+  ctx.restore();
+}
+function drawShooter(e, f, face) { // tireur de la ville : fragile, avec une orbe qui brille
+  const r = e.r; ctx.save(); ctx.scale(face, 1);
+  ctx.fillStyle = "#3b3552"; ctx.beginPath(); ctx.moveTo(-r * 0.8, r); ctx.lineTo(0, -r * 1.3); ctx.lineTo(r * 0.8, r); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#14101c"; ctx.beginPath(); ctx.arc(0, -r * 0.6, r * 0.5, 0, 6.283); ctx.fill();
+  ctx.fillStyle = "#ff6ac8"; ctx.fillRect(r * 0.05, -r * 0.7, 2, 2); ctx.fillRect(r * 0.3, -r * 0.7, 2, 2);
+  const glow = 0.6 + 0.4 * Math.sin(g.t * 6 + e.ph);
+  ctx.fillStyle = "rgba(255,106,200," + 0.35 * glow + ")"; ctx.beginPath(); ctx.arc(r * 1.2, 0, r * 0.8, 0, 6.283); ctx.fill();
+  ctx.fillStyle = "#ff6ac8"; ctx.beginPath(); ctx.arc(r * 1.2, 0, r * 0.35, 0, 6.283); ctx.fill();
+  ctx.restore();
+}
+const SKINS = { // couleurs des boss
+  base: { cape: "#2a1540", skull: "#e9e2d0", horn: "#c43a3a", eye: "#ff2a2a" },
+  garruk: { cape: "#1f3a22", skull: "#cdd6b8", horn: "#d9822b", eye: "#ffd36b" },
+  karn: { cape: "#3a4256", skull: "#cfd6e6", horn: "#8fa0c8", eye: "#6fc8ff" }
+};
 function drawBoss(e, f, face) {
-  const r = e.r;
+  const r = e.r, sk = SKINS[e.skin] || SKINS.base;
   ctx.translate(0, f * 2 - r * 0.2);
-  ctx.fillStyle = "#2a1540"; ctx.beginPath(); ctx.moveTo(0, -r * 0.9); ctx.lineTo(r * 1.1, r);
+  ctx.fillStyle = sk.cape; ctx.beginPath(); ctx.moveTo(0, -r * 0.9); ctx.lineTo(r * 1.1, r);
   for (let i = 0; i < 5; i++) { ctx.lineTo(r * 1.1 - (i + 0.5) * r * 0.44, r * 0.7); ctx.lineTo(r * 1.1 - (i + 1) * r * 0.44, r); }
   ctx.closePath(); ctx.fill();
   ctx.strokeStyle = "#8a7a5a"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(face * r, r * 0.9); ctx.lineTo(face * r, -r * 1.3); ctx.stroke();
   ctx.strokeStyle = "#cfd6e6"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(face * r, -r * 1.3); ctx.quadraticCurveTo(face * r * 0.6, -r * 1.7, face * r * 0.2, -r * 1.35); ctx.stroke();
-  ctx.fillStyle = "#e9e2d0"; ctx.beginPath(); ctx.arc(0, -r * 0.5, r * 0.48, 0, 6.283); ctx.fill();
-  ctx.fillStyle = "#c43a3a";
+  ctx.fillStyle = sk.skull; ctx.beginPath(); ctx.arc(0, -r * 0.5, r * 0.48, 0, 6.283); ctx.fill();
+  ctx.fillStyle = sk.horn;
   ctx.beginPath(); ctx.moveTo(-r * 0.4, -r * 0.8); ctx.lineTo(-r * 0.7, -r * 1.3); ctx.lineTo(-r * 0.1, -r * 0.95); ctx.fill();
   ctx.beginPath(); ctx.moveTo(r * 0.4, -r * 0.8); ctx.lineTo(r * 0.7, -r * 1.3); ctx.lineTo(r * 0.1, -r * 0.95); ctx.fill();
-  eyes(r * 0.2, -r * 0.5, r * 0.1, "#ff2a2a");
+  eyes(r * 0.2, -r * 0.5, r * 0.1, sk.eye);
   ctx.fillStyle = "#3a2f55"; ctx.fillRect(-r, -r * 2.1, r * 2, 5);
   ctx.fillStyle = "#e05a5a"; ctx.fillRect(-r, -r * 2.1, r * 2 * Math.max(0, e.hp) / e.max, 5);
+  if (e.name) { // nom du boss au-dessus de sa barre de vie
+    ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center"; ctx.lineWidth = 4; ctx.strokeStyle = "#14101c"; ctx.strokeText(e.name, 0, -r * 2.1 - 8);
+    ctx.fillStyle = sk.eye; ctx.fillText(e.name, 0, -r * 2.1 - 8);
+  }
 }
 function drawHero(p) {
   const s = p.face || 1;
@@ -676,6 +790,15 @@ function draw() {
   }
   ctx.fillStyle = "#ffe27a";
   for (const s of g.shots) { ctx.beginPath(); ctx.arc(s.x, s.y, 4, 0, 6.283); ctx.fill(); }
+  for (const q of g.eshots) { // projectiles ennemis
+    ctx.fillStyle = "rgba(255,106,200,.3)"; ctx.beginPath(); ctx.arc(q.x, q.y, 9, 0, 6.283); ctx.fill();
+    ctx.fillStyle = q.c || "#ff6ac8"; ctx.beginPath(); ctx.arc(q.x, q.y, 4.5, 0, 6.283); ctx.fill();
+  }
+  for (const rg of g.rings) { // onde de choc de Karn : le disque se remplit avant l’explosion
+    const k = 1 - rg.t / rg.T;
+    ctx.fillStyle = "rgba(255,90,60," + (0.12 + 0.2 * k) + ")"; ctx.beginPath(); ctx.arc(rg.x, rg.y, rg.r * k, 0, 6.283); ctx.fill();
+    ctx.strokeStyle = "rgba(255,120,80,.9)"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(rg.x, rg.y, rg.r, 0, 6.283); ctx.stroke();
+  }
   for (let i = 0; i < g.w.orbs; i++) {
     const a = g.ang + i * 6.283 / g.w.orbs;
     ctx.fillStyle = "#9fd8ff"; ctx.beginPath(); ctx.arc(p.x + Math.cos(a) * 60, p.y + Math.sin(a) * 60, 9, 0, 6.283); ctx.fill();
