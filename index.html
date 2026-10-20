@@ -50,17 +50,56 @@ addEventListener("resize", resize); resize();
 const keys = {};
 addEventListener("keydown", e => { const k = e.key.toLowerCase(); keys[k] = true; if (k.startsWith("arrow")) e.preventDefault(); });
 addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
-let stick = null, dashReq = false;
-cv.addEventListener("pointerdown", e => { const r = cv.getBoundingClientRect();
-  if (g && g.dashOn && Math.hypot(e.clientX - r.left - (W - 50), e.clientY - r.top - (H - 50)) < 42) { dashReq = true; return; } /* bouton de dash */ stick = { id: e.pointerId, ox: e.clientX - r.left, oy: e.clientY - r.top, x: 0, y: 0, l: r.left, t: r.top }; cv.setPointerCapture(e.pointerId); });
+let stick = null, dashReq = false, drag = null; // drag = sort en cours de visée (on le glisse de son icône vers la cible)
+cv.addEventListener("pointerdown", e => {
+  const r = cv.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  if (g && g.state === "play") {
+    const i = spellAt(sx, sy);
+    if (i >= 0) { // les icônes de sorts sont sur les côtés : on les fait glisser vers la cible
+      if (g.spellCd[i] <= 0 && !drag) { drag = { id: e.pointerId, i, sx, sy }; cv.setPointerCapture(e.pointerId); }
+      return;
+    }
+    if (g.dashOn && Math.hypot(sx - (W - 50), sy - (H - 50)) < 42) { dashReq = true; return; } // bouton de dash
+  }
+  stick = { id: e.pointerId, ox: sx, oy: sy, x: 0, y: 0, l: r.left, t: r.top }; cv.setPointerCapture(e.pointerId);
+});
 cv.addEventListener("pointermove", e => {
+  if (drag && e.pointerId === drag.id) { const r = cv.getBoundingClientRect(); drag.sx = e.clientX - r.left; drag.sy = e.clientY - r.top; return; }
   if (!stick || e.pointerId !== stick.id) return;
   let dx = e.clientX - stick.l - stick.ox, dy = e.clientY - stick.t - stick.oy;
   const d = Math.hypot(dx, dy), m = 50;
   if (d > m) { dx = dx / d * m; dy = dy / d * m; }
   stick.x = dx / m; stick.y = dy / m;
 });
-["pointerup", "pointercancel"].forEach(n => cv.addEventListener(n, e => { if (stick && e.pointerId === stick.id) stick = null; }));
+["pointerup", "pointercancel"].forEach(n => cv.addEventListener(n, e => {
+  if (drag && e.pointerId === drag.id) { const d = drag; drag = null; if (n === "pointerup") castSpell(d); return; }
+  if (stick && e.pointerId === stick.id) stick = null;
+}));
+
+// ====== Sorts : 4 sorts sur les côtés de l’écran, à faire glisser vers la zone ou le monstre visé ======
+const SPELLS = [ // seul le montant des dégâts change (et le temps de recharge, pour que le choix ait un sens)
+  { n: "Étincelle", c: "#9fd8ff", dmg: 12, r: 55, cd: 2 },
+  { n: "Éclair", c: "#ffe27a", dmg: 26, r: 55, cd: 4 },
+  { n: "Boule de feu", c: "#ff8a4a", dmg: 55, r: 55, cd: 8 },
+  { n: "Météore", c: "#d08bff", dmg: 120, r: 55, cd: 15 }
+];
+const rgba = (hex, a) => { const n = parseInt(hex.slice(1), 16); return "rgba(" + (n >> 16) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")"; };
+const spellPos = i => ({ x: i < 2 ? 44 : W - 44, y: H * 0.38 + (i % 2) * 78 }); // 2 sorts à gauche, 2 à droite
+const spellAt = (x, y) => { for (let i = 0; i < 4; i++) { const s = spellPos(i); if (Math.hypot(x - s.x, y - s.y) < 34) return i; } return -1; };
+function aimTarget(sx, sy) { // point visé dans le monde ; s’il y a un monstre tout près, le sort le vise lui (et le suit)
+  const x = sx + g.p.x - W / 2, y = sy + g.p.y - H / 2;
+  let best = null, bd = 34;
+  for (const e of g.enemies) { const d = Math.hypot(e.x - x, e.y - y) - e.r; if (d < bd) { bd = d; best = e; } }
+  return best ? { x: best.x, y: best.y, e: best } : { x, y, e: null };
+}
+function castSpell(d) { // relâché : le sort tombe là où on l’a visé ; relâché sur son icône, il est annulé
+  if (!g || g.state !== "play" || g.spellCd[d.i] > 0) return;
+  const ic = spellPos(d.i);
+  if (Math.hypot(d.sx - ic.x, d.sy - ic.y) < 44) return;
+  const t = aimTarget(d.sx, d.sy), S = SPELLS[d.i];
+  g.spellCd[d.i] = S.cd;
+  g.zones.push({ x: t.x, y: t.y, t: 0.3, T: 0.3, r: S.r, d: S.dmg * g.spellMul, c: S.c, follow: t.e, spell: true });
+}
 
 // ====== Équipements : raretés, emplacements, tirage ======
 const RAR = [ // la position dans la liste est l’identifiant stocké dans la base : ne pas réordonner
@@ -197,20 +236,25 @@ async function showProfiles() {
 let g;
 function newGame() {
   g = { state: "menu", t: 0, kills: 0, spawn: 0, cd: 0, ang: 0,
-    p: { x: 0, y: 0, r: 12, hp: 100, max: 100, speed: 150, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
-    w: { dmg: 10, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0, mode: "proj", radius: 70 },
-    enemies: [], shots: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], eshots: [], rings: [], pks: [], ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, ammo: 0, nodes: [], packs: [], ok: false, left: false, exitT: 0, lost: [], lv: LEVELS.foret, lvKey: "foret", unlockedNow: false, graves: [], gravePoll: 8, graveT: 0, graveId: 0, looting: false, tomb: false, msg: "", msgT: 0 };
+    p: { x: 0, y: 0, r: 12, hp: 60, max: 60, speed: 135, xp: 0, next: 5, lvl: 1, inv: 0, mag: 80 },
+    w: { dmg: 7, rate: 0.6, count: 1, orbs: 0, orbDmg: 8, pierce: 0, mode: "proj", radius: 70 },
+    enemies: [], shots: [], shards: [], loot: [], found: [], zones: [], fx: [], flames: [], eshots: [], rings: [], pks: [], spellCd: [0, 0, 0, 0], spellMul: 1, ls: 0, boom: 0, flame: 0, regen: 0, dashOn: false, dashCd: 4, dashT: 0, dashCdT: 0, dashV: null, cls: "base", run: 0, runF: 0, ammo: 0, nodes: [], packs: [], ok: false, left: false, exitT: 0, lost: [], lv: LEVELS.lisiere, lvKey: "lisiere", unlockedNow: false, graves: [], gravePoll: 8, graveT: 0, graveId: 0, looting: false, tomb: false, msg: "", msgT: 0 };
 }
 
 // Un niveau = décor, quantité de ressources et de monstres, force des monstres (hp, dmg), part de monstres d’élite (elite).
 const LEVELS = {
-  foret: { n: "Forêt", bg: "#14211a", grid: "#1c2d23", nodes: 16, packs: 7, enemies: 60, meutes: 22, bosses: [[650, 850], [950, 1200, "garruk"]], hp: 1, dmg: 1, elite: 0, nodeBonus: 0, charge: true, loot: { mob: [[0, 1]], boss: [[4, 1]] }, drop: 0.012,
+  // Lisière : zone d’entraînement du début (petite carte, monstres faibles et peu nombreux, peu de ressources)
+  lisiere: { n: "Lisière", radius: 650, trees: 0.28, basic: true, bg: "#17261c", grid: "#21352a", nodes: 8, packs: 3, enemies: 24, bosses: [], hp: 0.65, dmg: 0.6, elite: 0, nodeBonus: 0,
+    loot: { mob: [[0, 1]], boss: [[0, 1]] }, drop: 0.01,
+    d: "Zone d’entraînement : peu de monstres, tous faibles, et peu de ressources. Rapporte quelques éclats, améliore ton personnage en ville, puis aventure-toi plus loin." },
+  // power = Puissance minimale pour y entrer (somme des niveaux d’entraînement de la ville)
+  foret: { n: "Forêt", radius: 1300, trees: 0.6, power: 8, bg: "#14211a", grid: "#1c2d23", nodes: 16, packs: 7, enemies: 60, meutes: 22, bosses: [[650, 850], [950, 1200, "garruk"]], hp: 1, dmg: 1, elite: 0, nodeBonus: 0, charge: true, loot: { mob: [[0, 1]], boss: [[4, 1]] }, drop: 0.012,
     d: "Des arbres épais cachent les monstres et les gisements. Peu de ressources, mais des monstres plus faibles : des meutes de 3 loups rôdent entre les arbres, et Garruk règne sur la forêt. Vaincre un boss de la forêt ouvre la ville. Seuls des équipements communs y tombent, et les boss en lâchent des peu communs." },
-  ville: { n: "Ville en ruines", lock: "lvl_ville", hint: "Vaincs un boss de la forêt pour débloquer ce niveau.", bg: "#1a1c26", grid: "#242738", nodes: 55, packs: 11, enemies: 230,
+  ville: { n: "Ville en ruines", radius: 1300, lock: "lvl_ville", hint: "Vaincs un boss de la forêt pour débloquer ce niveau.", bg: "#1a1c26", grid: "#242738", nodes: 55, packs: 11, enemies: 230,
     bosses: [[600, 800], [850, 1000], [1050, 1220, "karn"]], tireurs: 0.2, hp: 1.5, dmg: 1.4, elite: 0.12, nodeBonus: 1, loot: { mob: [[0, 70], [4, 30]], boss: [[4, 1]] }, drop: 0.014,
     d: "Des rues en ruines, beaucoup de ressources, mais des monstres bien plus nombreux et plus forts, dont des tireurs fragiles qui gardent leurs distances. Karn règne sur la ville. Les monstres peuvent lâcher des équipements communs et peu communs." }
 };
-const HALF = 1300; // rayon de la carte ; la sortie est au centre, là où l’on commence
+// Le rayon de la carte (LEVELS.radius) varie selon le niveau ; la sortie est au centre, là où l’on commence.
 // ====== Obstacles : murs des ruines (ville) et troncs d’arbres (forêt) ======
 // Ces calculs doivent rester identiques à ceux du dessin (decor et drawTrees) : même grille, mêmes dimensions.
 function ruinRects(i, j) { // murs de la ruine de l’îlot (i, j), en rectangles [x, y, largeur, hauteur] ; la porte est un trou dans le mur du bas
@@ -220,9 +264,9 @@ function ruinRects(i, j) { // murs de la ruine de l’îlot (i, j), en rectangle
 }
 function treeCell(i, j) { // arbre de la cellule (i, j) de la forêt, ou null
   const cs = 80, h = Math.abs(Math.sin(i * 53.7 + j * 211.3) * 31415.9) % 1;
-  if (h > 0.6) return null;
+  if (h > (g.lv.trees || 0.6)) return null;
   const x = i * cs + ((h * 9973) % 1) * cs, y = j * cs + ((h * 7919) % 1) * cs, d = Math.hypot(x, y);
-  if (d < 120 || d > HALF + 40) return null; // la sortie reste dégagée
+  if (d < 120 || d > g.lv.radius + 40) return null; // la sortie reste dégagée
   return { x, y, r: 26 + ((h * 4409) % 1) * 14 }; // r = rayon de la cime ; le tronc est un petit cercle sous la cime
 }
 function blocked(x, y, r) { // le cercle (x, y, r) touche-t-il un obstacle ?
@@ -234,7 +278,7 @@ function blocked(x, y, r) { // le cercle (x, y, r) touche-t-il un obstacle ?
           const cx = Math.max(rx, Math.min(x, rx + rw)), cy = Math.max(ry, Math.min(y, ry + rh));
           if ((x - cx) ** 2 + (y - cy) ** 2 < r * r) return true;
         }
-  } else if (g.lvKey === "foret") {
+  } else if (g.lvKey === "foret" || g.lvKey === "lisiere") {
     const cs = 80;
     for (let i = Math.floor((x - r - 10) / cs); i <= Math.floor((x + r + 10) / cs); i++)
       for (let j = Math.floor((y - r - 20) / cs); j <= Math.floor((y + r + 20) / cs); j++) {
@@ -259,7 +303,7 @@ const BOSSES = { // boss nommés : Garruk règne sur la forêt, Karn sur la vill
   karn: { name: "Karn", r: 36, hpMul: 0.8, sp: 44, skin: "karn", armor: 0.35 } // blindé, salves en éventail, onde de choc
 };
 function spawnPack(x, y, aggro) { // meute de 3 loups (forêt) : faibles et rapides, ils patrouillent et s’alertent ensemble
-  const R = HALF - 40, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
+  const R = g.lv.radius - 40, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
   for (let k = 0; k < 10 && blocked(x, y, 30); k++) { x += (Math.random() - 0.5) * 80; y += (Math.random() - 0.5) * 80; }
   const sc = (1 + Math.hypot(x, y) / 900 + g.t / 240) * g.lv.hp;
   const pk = { home: { x, y }, tx: x, ty: y, wanderT: Math.random() * 3, alert: !!aggro, members: [] };
@@ -307,7 +351,7 @@ function bossCharge(e, dx, dy, d, dt) { // cycle : poursuite, hurlement (Garruk)
   } else if (e.stT <= 0) { e.st = "chase"; e.stT = (rage ? 2 : 4) + Math.random() * (rage ? 2 : 4); }
 }
 function spawnAt(x, y, aggro, boss) { // plus on s’éloigne de la sortie, plus les monstres sont nombreux et solides
-  const L = g.lv, R = HALF - 20, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
+  const L = g.lv, R = L.radius - 20, rr = Math.hypot(x, y); if (rr > R) { x *= R / rr; y *= R / rr; }
   for (let k = 0; k < 10 && blocked(x, y, 16); k++) { x += (Math.random() - 0.5) * 80; y += (Math.random() - 0.5) * 80; } // pas dans un mur
   const d = Math.hypot(x, y), r = Math.random() - L.elite, sc = (1 + d / 900 + g.t / 240) * L.hp;
   if (boss) { // boss ordinaire, ou boss nommé (BOSSES) avec ses pouvoirs
@@ -320,18 +364,18 @@ function spawnAt(x, y, aggro, boss) { // plus on s’éloigne de la sortie, plus
     const e = { x, y, r: 9, hp: 9 * sc, sp: 42, c: "#ff6ac8", oc: 0, k: 5, ph: Math.random() * 6, aggro: !!aggro, volT: 0.5 + Math.random() * 1.5 };
     g.enemies.push(e); return e;
   }
-  const type = d > 900 ? (r < 0.3 ? 2 : r < 0.6 ? 1 : 0) : d > 550 ? (r < 0.12 ? 2 : r < 0.4 ? 1 : 0) : (r < 0.2 ? 1 : 0);
+  const type = L.basic ? 0 : d > 900 ? (r < 0.3 ? 2 : r < 0.6 ? 1 : 0) : d > 550 ? (r < 0.12 ? 2 : r < 0.4 ? 1 : 0) : (r < 0.2 ? 1 : 0);
   const T = [{ r: 10, hp: 15, sp: 60, c: "#e05a5a" }, { r: 8, hp: 9, sp: 115, c: "#e8a838" }, { r: 18, hp: 70, sp: 42, c: "#a35ae0" }][type];
   const e = { x, y, r: T.r, hp: T.hp * sc, sp: T.sp * (0.9 + Math.random() * 0.2), c: T.c, oc: 0, k: type, ph: Math.random() * 6, aggro: !!aggro };
   g.enemies.push(e); return e;
 }
 function genWorld() { // remplit la carte selon le niveau : gisements, caisses de munitions, monstres et boss gardiens
-  const L = g.lv, rnd = (a, b) => a + Math.random() * (b - a);
+  const L = g.lv, R = L.radius - 50, near = Math.min(300, R * 0.4), rnd = (a, b) => a + Math.random() * (b - a);
   const pos = (dmin, dmax, r = 18) => { for (let k = 0; ; k++) { const a = rnd(0, 6.283), d = Math.sqrt(rnd(dmin * dmin, dmax * dmax)), q = { x: Math.cos(a) * d, y: Math.sin(a) * d }; if (k > 15 || !blocked(q.x, q.y, r)) return q; } }; // jamais dans un obstacle
-  for (let i = 0; i < L.nodes; i++) { const q = pos(180, 1250); g.nodes.push({ x: q.x, y: q.y, v: 1 + Math.floor(Math.hypot(q.x, q.y) / 350) + (Math.random() < 0.3 ? 1 : 0) + L.nodeBonus, prog: 0, ph: Math.random() * 6 }); }
-  for (let i = 0; i < L.packs; i++) { const q = pos(150, 1250); g.packs.push({ x: q.x, y: q.y, v: 15 }); }
-  for (let i = 0; i < L.enemies; i++) { const q = pos(300, 1250); spawnAt(q.x, q.y, false); }
-  for (let i = 0; i < (L.meutes || 0); i++) { const q = pos(300, 1250, 30); spawnPack(q.x, q.y, false); } // meutes de loups (forêt)
+  for (let i = 0; i < L.nodes; i++) { const q = pos(180, R); g.nodes.push({ x: q.x, y: q.y, v: 1 + Math.floor(Math.hypot(q.x, q.y) / 350) + (Math.random() < 0.3 ? 1 : 0) + L.nodeBonus, prog: 0, ph: Math.random() * 6 }); }
+  for (let i = 0; i < L.packs; i++) { const q = pos(150, R); g.packs.push({ x: q.x, y: q.y, v: 15 }); }
+  for (let i = 0; i < L.enemies; i++) { const q = pos(near, R); spawnAt(q.x, q.y, false); }
+  for (let i = 0; i < (L.meutes || 0); i++) { const q = pos(near, R, 30); spawnPack(q.x, q.y, false); } // meutes de loups (forêt)
   for (const [a, b, who] of L.bosses) { const q = pos(a, b, 30); spawnAt(q.x, q.y, false, who || true); }
 }
 
@@ -374,6 +418,7 @@ function update(dt) {
   const l = Math.hypot(mx, my);
   if (l > 1) { mx /= l; my /= l; }
   g.dashCdT -= dt;
+  for (let i = 0; i < 4; i++) g.spellCd[i] = Math.max(0, g.spellCd[i] - dt); // recharge des sorts
   const wantDash = keys[" "] || keys.shift || dashReq; dashReq = false;
   if (g.dashOn && wantDash && g.dashCdT <= 0 && g.dashT <= 0) { // dash : direction choisie au départ
     const dl = Math.hypot(mx, my);
@@ -387,7 +432,7 @@ function update(dt) {
   } else moveBy(p, mx * p.speed * dt, my * p.speed * dt, 10);
   if (g.regen) p.hp = Math.min(p.max, p.hp + g.regen * dt);
   p.mov = !!(mx || my); if (mx) p.face = mx > 0 ? 1 : -1;
-  const rr = Math.hypot(p.x, p.y); if (rr > HALF) { p.x *= HALF / rr; p.y *= HALF / rr; } // bord de la carte
+  const rr = Math.hypot(p.x, p.y); if (rr > g.lv.radius) { p.x *= g.lv.radius / rr; p.y *= g.lv.radius / rr; } // bord de la carte
   // Évacuation : reste 2 secondes dans la zone de sortie, une fois que tu t’en es éloigné
   if (rr > 300) g.left = true;
   if (rr < 55 && g.left) {
@@ -465,11 +510,12 @@ function update(dt) {
   }
   for (const z of g.zones) { // les zones magiques explosent après un court délai
     z.t -= dt;
+    if (z.follow && z.follow.hp > 0 && z.t > 0) { z.x = z.follow.x; z.y = z.follow.y; } // un sort lancé sur un monstre le suit
     if (z.t <= 0) {
       z.done = true;
       for (const e of g.enemies) if (Math.hypot(e.x - z.x, e.y - z.y) < z.r + e.r) dealDamage(e, z.d);
-      g.fx.push({ x: z.x, y: z.y, r: z.r, t: 0.25, c: "#b88af0" });
-      if (g.flame) g.flames.push({ x: z.x, y: z.y, r: z.r * 0.85, t: 2 + g.flame, k: 0 }); // flammes laissées sur place
+      g.fx.push({ x: z.x, y: z.y, r: z.r, t: 0.25, c: z.c || "#b88af0" });
+      if (g.flame && !z.spell) g.flames.push({ x: z.x, y: z.y, r: z.r * 0.85, t: 2 + g.flame, k: 0 }); // flammes laissées sur place
     }
   }
   g.zones = g.zones.filter(z => !z.done);
@@ -631,6 +677,29 @@ const SKINS = { // couleurs des boss
   garruk: { cape: "#1f3a22", skull: "#cdd6b8", horn: "#d9822b", eye: "#ffd36b" },
   karn: { cape: "#3a4256", skull: "#cfd6e6", horn: "#8fa0c8", eye: "#6fc8ff" }
 };
+function drawSpells(cx, cy) { // icônes des sorts sur les côtés, et visée en cours
+  if (g.state !== "play") return;
+  for (let i = 0; i < 4; i++) {
+    const S = SPELLS[i], { x, y } = spellPos(i), cd = g.spellCd[i], ready = cd <= 0, active = drag && drag.i === i;
+    ctx.fillStyle = "rgba(20,16,30,.6)"; ctx.beginPath(); ctx.arc(x, y, 30, 0, 6.283); ctx.fill();
+    ctx.fillStyle = rgba(S.c, ready ? 0.9 : 0.35); ctx.beginPath(); ctx.arc(x, y, 18, 0, 6.283); ctx.fill();
+    if (!ready) { // recharge : un disque sombre qui se vide
+      ctx.fillStyle = "rgba(10,8,16,.65)"; ctx.beginPath(); ctx.moveTo(x, y); ctx.arc(x, y, 30, -Math.PI / 2, -Math.PI / 2 + 6.283 * (cd / S.cd), false); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#f0eaf7"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center"; ctx.fillText(Math.ceil(cd), x, y + 5);
+    }
+    ctx.strokeStyle = active ? "#ffffff" : ready ? S.c : "#4a4060"; ctx.lineWidth = active ? 4 : 3; ctx.beginPath(); ctx.arc(x, y, 30, 0, 6.283); ctx.stroke();
+    ctx.fillStyle = "#f0eaf7"; ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.fillText(Math.round(S.dmg * g.spellMul), x, y + 46);
+  }
+  if (drag) { // visée : un cercle à l’endroit visé, accroché au monstre le plus proche ; sur l’icône, le sort est annulé
+    const S = SPELLS[drag.i], ic = spellPos(drag.i);
+    if (Math.hypot(drag.sx - ic.x, drag.sy - ic.y) >= 44) {
+      const t = aimTarget(drag.sx, drag.sy), tx = t.x - cx, ty = t.y - cy;
+      ctx.strokeStyle = rgba(S.c, 0.5); ctx.lineWidth = 2; ctx.setLineDash([6, 6]); ctx.beginPath(); ctx.moveTo(ic.x, ic.y); ctx.lineTo(tx, ty); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = rgba(S.c, 0.18); ctx.beginPath(); ctx.arc(tx, ty, S.r, 0, 6.283); ctx.fill();
+      ctx.strokeStyle = S.c; ctx.lineWidth = t.e ? 4 : 2; ctx.beginPath(); ctx.arc(tx, ty, S.r, 0, 6.283); ctx.stroke();
+    }
+  }
+}
 function drawBoss(e, f, face) {
   const r = e.r, sk = SKINS[e.skin] || SKINS.base;
   ctx.translate(0, f * 2 - r * 0.2);
@@ -708,7 +777,7 @@ function decor(cx, cy) { // décor du niveau, placé par un calcul fixe : identi
     }
 }
 function drawTrees(cx, cy) { // forêt : les cimes cachent ce qui est dessous (monstres, gisements, tombes…), sauf près du héros
-  if (g.lvKey !== "foret") return;
+  if (g.lvKey !== "foret" && g.lvKey !== "lisiere") return;
   const cs = 80, p = g.p;
   for (let i = Math.floor(cx / cs) - 1; i <= (cx + W) / cs + 1; i++)
     for (let j = Math.floor(cy / cs) - 1; j <= (cy + H) / cs + 1; j++) {
@@ -734,8 +803,8 @@ function draw() {
 
   ctx.save(); ctx.translate(-cx, -cy);
   decor(cx, cy);
-  ctx.fillStyle = "rgba(8,6,12,.78)"; ctx.beginPath(); ctx.rect(-5000, -5000, 10000, 10000); ctx.arc(0, 0, HALF, 0, 6.283, true); ctx.fill(); // hors de la carte
-  ctx.strokeStyle = "#8a3a4a"; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(0, 0, HALF, 0, 6.283); ctx.stroke();
+  ctx.fillStyle = "rgba(8,6,12,.78)"; ctx.beginPath(); ctx.rect(-5000, -5000, 10000, 10000); ctx.arc(0, 0, g.lv.radius, 0, 6.283, true); ctx.fill(); // hors de la carte
+  ctx.strokeStyle = "#8a3a4a"; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(0, 0, g.lv.radius, 0, 6.283); ctx.stroke();
   { // zone de sortie
     const pulse = 0.5 + 0.5 * Math.sin(g.t * 3);
     ctx.fillStyle = "rgba(255,211,107," + (0.10 + 0.08 * pulse) + ")"; ctx.beginPath(); ctx.arc(0, 0, 55, 0, 6.283); ctx.fill();
@@ -779,9 +848,9 @@ function draw() {
   }
   for (const e of g.enemies) if (Math.abs(e.x - p.x) < W / 2 + 70 && Math.abs(e.y - p.y) < H / 2 + 70) sprite(e);
   for (const z of g.zones) { // zone magique : le disque se remplit avant l’explosion
-    const k = 1 - z.t / 0.4;
-    ctx.fillStyle = "rgba(184,138,240,.25)"; ctx.beginPath(); ctx.arc(z.x, z.y, z.r * k, 0, 6.283); ctx.fill();
-    ctx.strokeStyle = "rgba(184,138,240,.9)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, 6.283); ctx.stroke();
+    const k = 1 - z.t / (z.T || 0.4), c = z.c || "#b88af0";
+    ctx.fillStyle = rgba(c, 0.25); ctx.beginPath(); ctx.arc(z.x, z.y, z.r * k, 0, 6.283); ctx.fill();
+    ctx.strokeStyle = rgba(c, 0.9); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, 6.283); ctx.stroke();
   }
   for (const f of g.fx) { // coup d’épée et explosions
     const x = f.follow ? p.x : f.x, y = f.follow ? p.y : f.y, k = f.t / (f.follow ? 0.18 : 0.25);
@@ -824,6 +893,7 @@ function draw() {
   ctx.fillStyle = "#8fe3ff"; ctx.fillText("Butin : " + g.run + " éclats" + (g.runF ? " · " + g.runF + " fragment" + (g.runF > 1 ? "s" : "") : "") + (g.found.length ? " · " + g.found.length + " équip." : ""), 12, 66); ctx.fillStyle = "#f0eaf7";
   ctx.fillStyle = g.ammo > 0 ? "#ffe27a" : "#ff6a6a"; ctx.fillText("Munitions : " + g.ammo + (g.ammo > 0 ? "" : " (coups de poing)"), 12, 84); ctx.fillStyle = "#f0eaf7";
   ctx.textAlign = "right"; ctx.fillText(fmt(g.t), W - 12, 30); ctx.fillText(g.lv.n, W - 12, 48);
+  drawSpells(cx, cy);
   if (g.dashOn) { // bouton de dash (aussi : Espace ou Maj)
     const bx = W - 50, by = H - 50, ready = g.dashCdT <= 0, k = ready ? 1 : 1 - g.dashCdT / g.dashCd;
     ctx.fillStyle = "rgba(20,16,30,.55)"; ctx.beginPath(); ctx.arc(bx, by, 30, 0, 6.283); ctx.fill();
@@ -852,7 +922,7 @@ const fmt = t => String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(Math
 // ====== Écrans (menu, niveau, fin) ======
 function show(html) { ov.innerHTML = '<div class="card">' + html + "</div>"; ov.hidden = false; }
 function showMenu() {
-  show("<h1>Veillée</h1><p>Joueur : <b>" + esc(meName) + "</b>" + (stats.parties ? " – " + stats.parties + " parties, " + (stats.evacuations || 0) + " évacuations" : "") + "</p><p>Explore la carte, récolte des éclats de lune, puis reviens à la sortie sans mourir. Si tu tombes, tu perds ton butin et ton équipement porté. Ton personnage attaque tout seul, mais tes munitions sont limitées.</p>" +
+  show("<h1>Veillée</h1><p>Joueur : <b>" + esc(meName) + "</b>" + (stats.parties ? " – " + stats.parties + " parties, " + (stats.evacuations || 0) + " évacuations" : "") + "</p><p>Explore la carte, récolte des éclats de lune, puis reviens à la sortie sans mourir. Si tu tombes, tu perds ton butin et ton équipement porté. Ton personnage attaque tout seul, mais tes munitions sont limitées. Glisse un sort depuis un côté de l’écran vers un monstre pour le lancer.</p>" +
     "<p>Clavier : Z Q S D, W A S D ou flèches. Écran tactile : glisse ton doigt.</p><p>Éclats de lune en réserve : <b>" + bank + "</b>.</p><button id='go'>Jouer</button> <button id='town' class='alt'>La ville</button>" + (has("armurerie") ? " <button id='eq' class='alt'>Équipement</button>" : "") + " <button id='who' class='alt'>Changer de joueur</button>");
   document.getElementById("go").onclick = play;
   document.getElementById("who").onclick = showProfiles;
@@ -901,17 +971,20 @@ function cityState() { // les dons s’accumulent : chaque bâtiment consomme so
   return { nb, have: f, next: BUILDINGS[nb + 1] || null, left: Math.max(0, total - (cityRow ? cityRow.funded : 0)) };
 }
 const has = k => BUILDINGS.findIndex(b => b.k === k) <= cityState().nb;
+const puissance = () => (town.maison || 0) + (town.entrainement || 0) + (town.arsenal || 0); // somme des niveaux d’entraînement : mesure la force du personnage
+const levelOpen = L => (!L.lock || town[L.lock]) && puissance() >= (L.power || 0);
+const trackCost = (T, lv) => Math.round(T.c0 * 1.45 ** lv); // coût du prochain niveau d’un entraînement
 
 // ====== Lancer une partie ======
 function showLevels(cls) { // étape de choix du niveau, après le choix de la classe
-  show("<h2>Choisis ton niveau</h2><p>Chaque niveau a ses dangers et ses richesses.</p>");
+  show("<h2>Choisis ton niveau</h2><p>Chaque niveau a ses dangers et ses richesses. Ta puissance : <b>" + puissance() + "</b>.</p>");
   const card = ov.firstChild;
   for (const [k, L] of Object.entries(LEVELS)) {
-    const open = !L.lock || town[L.lock];
+    const needP = L.power || 0, okP = puissance() >= needP, open = levelOpen(L);
     const b = document.createElement("button");
     b.className = "opt"; b.innerHTML = "<b></b><span></span>"; b.disabled = !open;
     b.firstChild.textContent = L.n + (open ? "" : " (verrouillé)");
-    b.lastChild.textContent = open ? L.d : L.hint;
+    b.lastChild.textContent = open ? L.d : (!okP ? "Puissance requise : " + needP + " (la tienne : " + puissance() + "). Améliore ton personnage en ville : Endurance à la Maison, Entraînement à l’Auberge." : L.hint);
     if (open) b.onclick = () => startGame(cls, k);
     card.appendChild(b);
   }
@@ -921,12 +994,14 @@ function showLevels(cls) { // étape de choix du niveau, après le choix de la c
 }
 function play() { if (has("taverne")) showClasses(); else showLevels("base"); }
 async function startGame(cls, lvl) { // lvl = clé du niveau (forêt par défaut)
-  const lvKey = LEVELS[lvl] ? lvl : "foret";
+  const lvKey = LEVELS[lvl] ? lvl : "lisiere";
   try { await loadCity(); } catch (e) {} // état du camp à jour
   let graves = []; try { graves = await sb("/graves?select=*&level=eq." + lvKey); } catch (e) {} // tombes des joueurs morts
   newGame(); g.state = "play"; ov.hidden = true; g.graves = graves; g.lvKey = lvKey; g.lv = LEVELS[lvKey];
   g.lootOn = has("armurerie"); g.cls = CLASSES[cls] ? cls : "base";
-  g.p.max += 10 * (town.maison || 0); // maison
+  g.p.max += 10 * (town.maison || 0); // Maison : endurance
+  g.w.dmg *= 1 + 0.08 * (town.entrainement || 0); // Auberge : entraînement
+  g.spellMul = 1 + 0.08 * (town.entrainement || 0); // les sorts profitent aussi de l’entraînement et des équipements
   if (CLASSES[cls]) {
     applyClass(cls);
     if (town.up_taverne) for (const T of TALENTS[cls]) T.f(g, ((stats.talents || {})[cls] || {})[T.id] || 0);
@@ -935,7 +1010,7 @@ async function startGame(cls, lvl) { // lvl = clé du niveau (forêt par défaut
     const eq = stats.equip || {};
     for (const it of inv) if (eq[it.kind] === it.id) {
       const v = it.data.val, t = it.data.st;
-      if (t === "dmg") g.w.dmg *= 1 + v / 100;
+      if (t === "dmg") { g.w.dmg *= 1 + v / 100; g.spellMul *= 1 + v / 100; }
       else if (t === "hp") g.p.max += v;
       else if (t === "speed") g.p.speed *= 1 + v / 100;
       else if (t === "mag") g.p.mag += v;
@@ -943,7 +1018,7 @@ async function startGame(cls, lvl) { // lvl = clé du niveau (forêt par défaut
     }
   }
   g.p.hp = g.p.max;
-  g.ammo = { guerrier: 45, archer: 70, mage: 50 }[g.cls] || 60; // munitions de départ selon la classe
+  g.ammo = ({ guerrier: 30, archer: 45, mage: 35 }[g.cls] || 40) + 5 * (town.arsenal || 0); // munitions de départ : classe + Arsenal // munitions de départ selon la classe
   genWorld();
   g.msg = "Récolte des éclats, puis reviens à la sortie !"; g.msgC = "#ffd36b"; g.msgT = 5;
 }
@@ -969,9 +1044,9 @@ function showOver() {
 // Ordre de déblocage = ordre de la liste. cost = éclats de lune à réunir ensemble (la maison est offerte).
 // x et y = position sur la carte. up = amélioration payée en fragments de boss.
 const BUILDINGS = [
-  { k: "maison", n: "Maison", cost: 0, d: "Ton chez-toi : +10 PV de départ par niveau.", x: 95, y: 118 },
-  { k: "auberge", n: "Auberge", cost: 10, d: "Pas encore d’effet : ce bâtiment attend une nouvelle fonction.", x: 305, y: 112 },
-  { k: "armurerie", n: "Armurerie", cost: 100, d: "Débloque les équipements : ils tombent pendant les parties et donnent des bonus, parfois un pouvoir spécial.", x: 72, y: 208,
+  { k: "maison", n: "Maison", cost: 0, d: "Ton chez-toi : en te reposant, tu gagnes en endurance (+10 PV de départ par niveau).", x: 95, y: 118, track: { key: "maison", n: "Endurance", max: 10, c0: 3 } },
+  { k: "auberge", n: "Auberge", cost: 10, d: "Un lieu d’entraînement : tu apprends à frapper plus fort (+8 % de dégâts par niveau).", x: 305, y: 112, track: { key: "entrainement", n: "Entraînement", max: 10, c0: 4 } },
+  { k: "armurerie", n: "Armurerie", cost: 100, d: "Débloque les équipements (bonus et parfois un pouvoir spécial) et l’arsenal : +5 munitions de départ par niveau.", x: 72, y: 208, track: { key: "arsenal", n: "Arsenal", max: 8, c0: 4 },
     up: { key: "up_armurerie", frag: 1, d: "détruire un équipement dont tu ne veux plus, contre des éclats de lune (1 pour un commun, jusqu’à 20 pour un légendaire)." } },
   { k: "taverne", n: "Taverne", cost: 100, d: "Débloque les classes : tu choisis ton personnage avant chaque partie.", x: 332, y: 208,
     up: { key: "up_taverne", frag: 10, d: "un arbre de talents propre à chaque classe." } },
@@ -996,7 +1071,7 @@ function townSVG(nb, showSite) {
   for (const [x, y] of trees) s += '<rect x="' + (x - 2) + '" y="' + (y + 18) + '" width="4" height="8" fill="#3a2a1c"/><path d="M' + x + ' ' + (y - 6) + 'l-12 26h24z" fill="#1b3a2a"/>';
   s += '<g transform="translate(200 142)"><circle cy="-4" r="26" fill="rgba(255,154,58,.12)"/><ellipse cy="4" rx="10" ry="4" fill="#2a1a10"/><path d="M0 -14q-8 10 0 18q8 -8 0 -18z" fill="#ff9a3a"/><path d="M0 -8q-4 6 0 10q4 -4 0 -10z" fill="#ffe27a"/></g>';
   for (const { B, i } of vis.sort((a, b) => a.B.y - b.B.y)) {
-    const built = i <= nb, lv = B.k === "maison" ? town.maison || 0 : 0;
+    const built = i <= nb, lv = B.track ? town[B.track.key] || 0 : 0;
     s += '<g transform="translate(' + B.x + ' ' + B.y + ')"' + (built ? ' data-k="' + B.k + '" tabindex="0" role="button" aria-label="' + B.n + '" style="cursor:pointer"' : '') + '>' +
       '<ellipse cx="0" cy="3" rx="34" ry="6" fill="rgba(0,0,0,.28)"/>' +
       (built && townSel === B.k ? '<ellipse cx="0" cy="3" rx="40" ry="10" fill="none" stroke="#b88af0" stroke-width="2.5"/>' : '') +
@@ -1021,7 +1096,7 @@ async function showTown() { // charge l’état partagé du camp, puis dessine l
 function renderTown() {
   const names = townData.names, cs = cityState(), nb = cs.nb;
   if (!townSel) townSel = BUILDINGS[0].k;
-  show("<h2>La ville</h2>" + townSVG(nb, !!cityRow && !!cs.next) + "<p>Éclats de lune : <b>" + bank + "</b> · Fragments de boss : <b>" + frag + "</b>. Touche un bâtiment pour voir sa fiche.</p>");
+  show("<h2>La ville</h2>" + townSVG(nb, !!cityRow && !!cs.next) + "<p>Éclats de lune : <b>" + bank + "</b> · Fragments de boss : <b>" + frag + "</b> · Puissance : <b>" + puissance() + "</b>. Touche un bâtiment pour voir sa fiche.</p>");
   const card = ov.firstChild; card.classList.add("wide");
   card.querySelectorAll("[data-k]").forEach(el => {
     const pick = () => { townSel = el.dataset.k; renderTown(); };
@@ -1040,9 +1115,9 @@ function renderTown() {
       b.textContent = label; if (alt) b.className = "alt"; b.disabled = !!disabled; b.style.cssText = "margin:0 6px 6px 0"; b.onclick = on;
       panel.appendChild(b);
     };
-    if (B.k === "maison") {
-      const lv = town.maison || 0, full = lv >= 8, cost = Math.round(5 * 1.5 ** lv);
-      add(full ? "Niveau maximum" : "Améliorer (niv. " + lv + "/8) – " + cost + " éclats", () => { bank -= cost; town.maison = lv + 1; saveRemote(true); renderTown(); }, full || bank < cost);
+    if (B.track) { // entraînement permanent du personnage, payé en éclats de lune
+      const T = B.track, lv = town[T.key] || 0, full = lv >= T.max, cost = trackCost(T, lv);
+      add(full ? T.n + " : niveau maximum" : "Améliorer " + T.n + " (niv. " + lv + "/" + T.max + ") – " + cost + " éclats", () => { bank -= cost; town[T.key] = lv + 1; saveRemote(true); renderTown(); }, full || bank < cost);
     }
     if (B.k === "armurerie") add("Ouvrir l’équipement", () => showEquip(showTown), false, true);
     if (B.k === "taverne" && town.up_taverne) add("Arbres de talents", () => showTalents(), false, true);
@@ -1231,7 +1306,8 @@ function showDebug() {
   RAR.map((R, id) => ({ R, id })).sort((a, b) => a.R.ord - b.R.ord).forEach(({ R, id }) => add("+1 " + R.n.toLowerCase(), () => dbgItem(id)));
   add("+1 peu commun avec pouvoir", () => dbgItem(4, true));
   group("Progression");
-  add("Tout débloquer (ville, classes, améliorations)", () => { Object.assign(town, { lvl_ville: 1, cl_archer: 1, cl_mage: 1, up_armurerie: 1, up_taverne: 1, up_survie: 1 }); dbgMsg = "Ville, classes et améliorations débloquées."; dbgDone(); });
+  add("Tout débloquer (ville, classes, améliorations)", () => { Object.assign(town, { lvl_ville: 1, cl_archer: 1, cl_mage: 1, up_armurerie: 1, up_taverne: 1, up_survie: 1, maison: Math.max(town.maison || 0, 4), entrainement: Math.max(town.entrainement || 0, 4) }); dbgMsg = "Ville, classes, améliorations débloquées et Puissance 8 atteinte (forêt ouverte)."; dbgDone(); });
+  add("+1 niveau à chaque entraînement", () => { for (const [k, m] of [["maison", 10], ["entrainement", 10], ["arsenal", 8]]) town[k] = Math.min(m, (town[k] || 0) + 1); dbgMsg = "Puissance : " + puissance(); dbgDone(); });
   group("Camp partagé (SQL requis)");
   add("Tout construire", () => dbgCamp("full"));
   add("Remettre à zéro + vider les tombes", () => dbgCamp("reset"));
